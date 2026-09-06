@@ -1,0 +1,293 @@
+from datetime import date as date_cls
+from typing import Any, Dict, List, Optional
+
+from bson import ObjectId
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+
+
+class PyObjectId(ObjectId):
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, v):
+        if not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId: {v}")
+        return ObjectId(v)
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, field_schema):
+        field_schema.update(type="string")
+
+
+class ORMModel(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True,
+        json_encoders={ObjectId: str},
+    )
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+
+
+# ---------------- Customers ----------------
+class CustomerCreate(BaseModel):
+    name: str
+    customer_type: str = "HOTEL"
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    billing_method: str = "PER_ITEM"
+    payment_terms: str = "NET_30"
+    is_active: bool = True
+    notes: Optional[str] = None
+
+
+class CustomerUpdate(BaseModel):
+    name: Optional[str] = None
+    customer_type: Optional[str] = None
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    billing_method: Optional[str] = None
+    payment_terms: Optional[str] = None
+    is_active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+# ---------------- Categories & Items ----------------
+class CategoryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    is_active: bool = True
+
+
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ItemCreate(BaseModel):
+    name: str
+    category_id: Optional[str] = None
+    standard_cost: float = 0.0
+    default_rate: float = 0.0
+    unit: str = "PIECE"
+    is_active: bool = True
+
+
+class ItemUpdate(BaseModel):
+    name: Optional[str] = None
+    category_id: Optional[str] = None
+    standard_cost: Optional[float] = None
+    default_rate: Optional[float] = None
+    unit: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class CustomerRateCreate(BaseModel):
+    customer_id: Optional[str] = None
+    item_id: str
+    rate: float = 0.0
+    cost: float = 0.0
+    is_active: bool = True
+
+
+# ---------------- Transactions ----------------
+class TransactionItemCreate(BaseModel):
+    item_id: Optional[str] = None
+    item_name: Optional[str] = None
+    category_name: Optional[str] = None
+    quantity_received: float = 0.0
+    quantity_washed: float = 0.0
+    quantity_delivered: float = 0.0
+    quantity_rejected: float = 0.0
+    quantity_damaged: float = 0.0
+    quantity_missing: float = 0.0
+    quantity_stored: float = 0.0
+    rate: float = 0.0
+    cost: float = 0.0
+    line_total: float = 0.0
+    line_cost: float = 0.0
+    line_profit: float = 0.0
+    status: str = "RECEIVED"
+    notes: Optional[str] = None
+
+
+class TransactionCreate(BaseModel):
+    transaction_date: date_cls
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    invoice_number: Optional[str] = None
+    status: str = "COMPLETED"
+    source: str = "MANUAL"
+    import_batch_id: Optional[str] = None
+    items: List[TransactionItemCreate]
+    total_quantity: float = 0.0
+    total_amount: float = 0.0
+    total_cost: float = 0.0
+    total_profit: float = 0.0
+    notes: Optional[str] = None
+
+
+class TransactionUpdate(BaseModel):
+    transaction_date: Optional[date_cls] = None
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    invoice_number: Optional[str] = None
+    status: Optional[str] = None
+    items: Optional[List[TransactionItemCreate]] = None
+    total_quantity: Optional[float] = None
+    total_amount: Optional[float] = None
+    total_cost: Optional[float] = None
+    total_profit: Optional[float] = None
+    notes: Optional[str] = None
+
+
+# ---------------- Payments ----------------
+class PaymentCreate(BaseModel):
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    amount: float
+    payment_date: date_cls
+    payment_method: str = "CASH"
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PaymentUpdate(BaseModel):
+    amount: Optional[float] = None
+    payment_date: Optional[date_cls] = None
+    payment_method: Optional[str] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+    customer_name: Optional[str] = None
+
+
+# ---------------- Employees & Salaries ----------------
+class EmployeeCreate(BaseModel):
+    name: str
+    position: Optional[str] = None
+    department: str = "GENERAL"
+    phone: Optional[str] = None
+    nic: Optional[str] = None
+    basic_salary: float = 0.0
+    daily_rate: float = 0.0
+    epf_rate: float = 0.0
+    etf_rate: float = 0.0
+    joined_date: Optional[date_cls] = None
+    status: str = "ACTIVE"
+    notes: Optional[str] = None
+
+
+class EmployeeUpdate(BaseModel):
+    name: Optional[str] = None
+    position: Optional[str] = None
+    department: Optional[str] = None
+    phone: Optional[str] = None
+    nic: Optional[str] = None
+    basic_salary: Optional[float] = None
+    daily_rate: Optional[float] = None
+    epf_rate: Optional[float] = None
+    etf_rate: Optional[float] = None
+    joined_date: Optional[date_cls] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class SalaryCreate(BaseModel):
+    month: str
+    year: Optional[int] = None
+    basic_salary: float = 0.0
+    overtime_hours: float = 0.0
+    overtime_rate: float = 0.0
+    allowances: float = 0.0
+    deductions: float = 0.0
+    epf_deduction: float = 0.0
+    etf_deduction: float = 0.0
+    loan_deduction: float = 0.0
+    advance_deduction: float = 0.0
+    epf_employee: float = 0.0
+    epf_employer: float = 0.0
+    etf_employer: float = 0.0
+    amount_paid: float = 0.0
+    net_salary: float = 0.0
+    paid: bool = False
+    paid_date: Optional[date_cls] = None
+    notes: Optional[str] = None
+
+
+class SalaryUpdate(BaseModel):
+    basic_salary: Optional[float] = None
+    overtime_hours: Optional[float] = None
+    overtime_rate: Optional[float] = None
+    allowances: Optional[float] = None
+    epf_deduction: Optional[float] = None
+    etf_deduction: Optional[float] = None
+    loan_deduction: Optional[float] = None
+    advance_deduction: Optional[float] = None
+    amount_paid: Optional[float] = None
+    net_salary: Optional[float] = None
+    paid: Optional[bool] = None
+    paid_date: Optional[date_cls] = None
+    notes: Optional[str] = None
+
+
+class AttendanceCreate(BaseModel):
+    employee_id: str
+    date: date_cls
+    status: str = "PRESENT"
+    overtime_hours: float = 0.0
+    notes: Optional[str] = None
+
+
+# ---------------- Expenses ----------------
+class ExpenseCategoryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    is_active: bool = True
+
+
+class ExpenseCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ExpenseCreate(BaseModel):
+    date: date_cls = Field(validation_alias=AliasChoices("date", "expense_date"))
+    category_id: Optional[str] = None
+    category_name: Optional[str] = None
+    amount: float
+    description: Optional[str] = None
+    reference: Optional[str] = None
+    payment_method: str = "CASH"
+    is_recurring: bool = False
+    notes: Optional[str] = None
+
+
+class ExpenseUpdate(BaseModel):
+    date: Optional[date_cls] = Field(default=None, validation_alias=AliasChoices("date", "expense_date"))
+    category_id: Optional[str] = None
+    category_name: Optional[str] = None
+    amount: Optional[float] = None
+    description: Optional[str] = None
+    reference: Optional[str] = None
+    payment_method: Optional[str] = None
+    is_recurring: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+# ---------------- Bulk Import ----------------
+class BulkImportCreate(BaseModel):
+    file_name: str
+    status: str = "IMPORTED"
+    total_rows: int = 0
+    success_rows: int = 0
+    error_rows: int = 0
+    errors: List[Dict[str, Any]] = Field(default_factory=list)
+    notes: Optional[str] = None
+
