@@ -43,29 +43,48 @@ def _num(value) -> float:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+DEFAULT_SETTINGS = {
+    "company_name": "Love Laundry",
+    "working_days_per_week": 6,
+    "working_days_pattern": [0, 1, 2, 3, 4, 5],
+    "default_overtime_rate": 0,
+    "salary_basis_days": 30,
+}
+
+
 async def _get_company_settings() -> dict:
     doc = await company_settings_collection().find_one({"key": "main"})
-    if doc:
-        return {
-            "working_days_per_week": doc.get("working_days_per_week", 6),
-            "working_days_pattern": doc.get("working_days_pattern", [0, 1, 2, 3, 4, 5]),
-            "default_overtime_rate": doc.get("default_overtime_rate", 0),
-            "salary_basis_days": doc.get("salary_basis_days", 30),
-        }
-    return {
-        "working_days_per_week": 6,
-        "working_days_pattern": [0, 1, 2, 3, 4, 5],
-        "default_overtime_rate": 0,
-        "salary_basis_days": 30,
-    }
+    return {**DEFAULT_SETTINGS, **(doc or {})}
 
 
 async def _get_holiday_dates(start: str, end: str) -> set:
-    cursor = holidays_collection().find({"date": {"$gte": start, "$lte": end}})
-    dates = set()
+    """Return ISO date strings in [start, end], expanding recurring (yearly) holidays."""
+    start_date = date_cls.fromisoformat(start)
+    end_date = date_cls.fromisoformat(end)
+    result: set = set()
+
+    cursor = holidays_collection().find({"date": {"$lte": end}}).sort("date", 1)
     async for doc in cursor:
-        dates.add(doc["date"])
-    return dates
+        h_date = doc.get("date")
+        if not h_date:
+            continue
+        try:
+            hd = date_cls.fromisoformat(h_date)
+        except (ValueError, AttributeError):
+            continue
+        if start_date <= hd <= end_date:
+            result.add(h_date)
+        if doc.get("is_recurring"):
+            year = start_date.year
+            while year <= end_date.year:
+                try:
+                    candidate = hd.replace(year=year)
+                    if start_date <= candidate <= end_date:
+                        result.add(candidate.isoformat())
+                except ValueError:
+                    pass
+                year += 1
+    return result
 
 
 async def _get_attendance(employee_id: str, start: str, end: str) -> list:
@@ -178,14 +197,16 @@ async def _calculate_period_salary(
         total_working_days += 1
         att = attendance_by_date.get(date_str)
         if att:
-            status = att.get("status", "ABSENT")
-            if status == "PRESENT":
+            status = (att.get("status") or "ABSENT").upper()
+            if status in ("PRESENT",):
                 worked_days += 1
-            elif status == "HALF_DAY":
+            elif status in ("HALF_DAY",):
                 worked_days += 0.5
                 absent_days += 0.5
-            elif status == "ON_LEAVE":
+            elif status in ("ON_LEAVE", "PAID_LEAVE"):
                 leave_days += 1
+            elif status in ("UNPAID_LEAVE", "ABSENT"):
+                absent_days += 1
             else:
                 absent_days += 1
             total_ot_hours += _num(att.get("overtime_hours"))
@@ -366,10 +387,19 @@ async def create_salary_slip(
     emp_code = emp.get("employee_code") or f"EMP{slip_count_for_emp + 1:03d}"
     slip_number = f"{emp_code}-{period_start_str[:7].replace('-', '')}-{slip_count_for_emp + 1:04d}"
 
+    if _num(payload.base_salary_for_period) > 0:
+        base_for_period = round(_num(payload.base_salary_for_period), 2)
+    else:
+        base_for_period = round(
+            _num(payload.adjusted_base_salary) * _num(payload.worked_days) / max(_num(payload.calendar_days), 1),
+            2,
+        )
+
     total_earnings = round(
-        _num(payload.adjusted_base_salary) * _num(payload.worked_days) / max(_num(payload.calendar_days), 1)
+        base_for_period
         + _num(payload.overtime_pay)
-        + _num(payload.extra_work_total),
+        + _num(payload.extra_work_total)
+        + _num(payload.allowances),
         2,
     )
 
@@ -392,11 +422,14 @@ async def create_salary_slip(
         "period_end": period_end_str,
         "basic_salary": round(_num(payload.basic_salary), 2),
         "adjusted_base_salary": round(_num(payload.adjusted_base_salary), 2),
+        "base_salary_for_period": base_for_period,
         "calendar_days": payload.calendar_days,
         "working_days": payload.working_days,
         "worked_days": round(_num(payload.worked_days), 2),
         "absent_days": round(_num(payload.absent_days), 2),
         "leave_days": round(_num(payload.leave_days), 2),
+        "holiday_count": payload.holiday_count,
+        "weekend_count": payload.weekend_count,
         "overtime_hours": round(_num(payload.overtime_hours), 2),
         "overtime_rate": round(_num(payload.overtime_rate), 2),
         "overtime_pay": round(_num(payload.overtime_pay), 2),
@@ -514,7 +547,7 @@ async def update_salary_slip(
         raise BadRequestError("Cannot edit a cancelled salary slip")
 
     updates = payload.model_dump(exclude_none=True)
-    for k in ["basic_salary", "adjusted_base_salary", "worked_days", "absent_days", "leave_days",
+    for k in ["basic_salary", "adjusted_base_salary", "base_salary_for_period", "worked_days", "absent_days", "leave_days",
               "overtime_hours", "overtime_rate", "overtime_pay", "allowances", "extra_work_total",
               "epf_employee", "epf_employer", "etf_employer", "advance_deductions", "loan_deduction",
               "other_deductions", "amount_paid"]:
@@ -525,8 +558,14 @@ async def update_salary_slip(
         updates["paid_date"] = updates["paid_date"].isoformat() if hasattr(updates["paid_date"], "isoformat") else updates["paid_date"]
 
     base = {**existing, **updates}
+    base_for_period = _num(base.get("base_salary_for_period"))
+    if base_for_period <= 0:
+        base_for_period = round(
+            _num(base.get("adjusted_base_salary")) * _num(base.get("worked_days")) / max(_num(base.get("calendar_days", 30)), 1),
+            2,
+        )
     total_earnings = round(
-        _num(base.get("adjusted_base_salary")) * _num(base.get("worked_days")) / max(_num(base.get("calendar_days", 30)), 1)
+        base_for_period
         + _num(base.get("overtime_pay"))
         + _num(base.get("extra_work_total"))
         + _num(base.get("allowances")),
@@ -693,6 +732,240 @@ async def bulk_set_attendance(
         )
         count += 1
     return {"success": True, "count": count}
+
+
+# ── General attendance listing ─────────────────────────────────────────────
+@router.get("/attendance")
+async def list_attendance_range(
+    employee_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    current_user: dict = Depends(require_capability("salary:read")),
+):
+    query: dict = {}
+    if employee_id:
+        query["employee_id"] = employee_id
+    if start_date or end_date:
+        dateq: dict = {}
+        if start_date:
+            dateq["$gte"] = start_date
+        if end_date:
+            dateq["$lte"] = end_date
+        query["date"] = dateq
+    cursor = attendance_collection().find(query).sort("date", 1)
+    return [serialize(doc, ["notes"]) async for doc in cursor]
+
+
+# ── Attendance summary (mirrors the salary engine) ─────────────────────────
+@router.get("/attendance/summary")
+async def attendance_summary(
+    employee_id: str = Query(...),
+    start_date: str = Query(...),
+    end_date: str = Query(...),
+    current_user: dict = Depends(require_capability("salary:read")),
+):
+    _parse_oid(employee_id, "employee")
+    settings = await _get_company_settings()
+    working_days_pattern = settings.get("working_days_pattern", [0, 1, 2, 3, 4, 5])
+    holiday_dates = await _get_holiday_dates(start_date, end_date)
+
+    emp = await employees_collection().find_one({"_id": _parse_oid(employee_id, "employee")})
+    start_dt = date_cls.fromisoformat(start_date)
+    end_dt = date_cls.fromisoformat(end_date)
+    if emp:
+        if emp.get("joined_date"):
+            try:
+                jd = date_cls.fromisoformat(emp["joined_date"])
+                if jd > start_dt:
+                    start_dt = jd
+            except (ValueError, AttributeError):
+                pass
+        if emp.get("leaving_date"):
+            try:
+                ld = date_cls.fromisoformat(emp["leaving_date"])
+                if ld < end_dt:
+                    end_dt = ld
+            except (ValueError, AttributeError):
+                pass
+
+    records = await _get_attendance(employee_id, start_date, end_date)
+    by_date = {rec["date"]: rec for rec in records}
+
+    worked_days = 0.0
+    half_days = 0.0
+    paid_leave_days = 0.0
+    unpaid_leave_days = 0.0
+    absent_days = 0.0
+    total_ot = 0.0
+    holiday_count = 0
+    weekend_count = 0
+    working_day_count = 0
+    daily = []
+
+    day = start_dt
+    while day <= end_dt:
+        date_str = day.isoformat()
+        dow = day.weekday()
+        rec = by_date.get(date_str)
+
+        if dow not in working_days_pattern:
+            weekend_count += 1
+            category = "WEEKEND"
+        elif date_str in holiday_dates:
+            holiday_count += 1
+            category = "HOLIDAY"
+        else:
+            working_day_count += 1
+            category = "WORKING"
+            status = (rec or {}).get("status", "ABSENT")
+            if status == "PRESENT":
+                worked_days += 1
+            elif status == "HALF_DAY":
+                half_days += 0.5
+                absent_days += 0.5
+            elif status in ("ON_LEAVE", "PAID_LEAVE"):
+                paid_leave_days += 1
+            elif status == "UNPAID_LEAVE":
+                unpaid_leave_days += 1
+            else:
+                absent_days += 1
+
+        if rec:
+            total_ot += _num(rec.get("overtime_hours"))
+            daily.append({
+                "date": date_str, "dow": dow, "category": category,
+                "status": rec.get("status"),
+                "overtime_hours": _num(rec.get("overtime_hours")),
+                "check_in_time": rec.get("check_in_time"),
+                "check_out_time": rec.get("check_out_time"),
+            })
+        else:
+            daily.append({
+                "date": date_str, "dow": dow, "category": category,
+                "status": None, "overtime_hours": 0, "check_in_time": None, "check_out_time": None,
+            })
+        day = date_cls.fromordinal(day.toordinal() + 1)
+
+    return {
+        "employee_id": employee_id,
+        "start_date": start_dt.isoformat(),
+        "end_date": end_dt.isoformat(),
+        "calendar_days": (end_dt - start_dt).days + 1,
+        "working_day_count": working_day_count,
+        "weekend_count": weekend_count,
+        "holiday_count": holiday_count,
+        "worked_days": worked_days,
+        "half_days": half_days,
+        "paid_leave_days": paid_leave_days,
+        "unpaid_leave_days": unpaid_leave_days,
+        "absent_days": absent_days,
+        "overtime_hours": total_ot,
+        "daily": daily,
+    }
+
+
+# ── Payroll preview (all active employees for a month) ─────────────────────
+@router.get("/salary/payroll-preview")
+async def payroll_preview(
+    year: int = Query(...),
+    month: int = Query(...),
+    current_user: dict = Depends(require_capability("salary:read")),
+):
+    num_days = calendar.monthrange(year, month)[1]
+    start_date = f"{year:04d}-{month:02d}-01"
+    end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
+
+    results = []
+    cursor = employees_collection().find({"is_active": True})
+    async for emp in cursor:
+        try:
+            emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
+            calc = await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, "MONTHLY")
+        except Exception:
+            continue
+        results.append(calc)
+
+    results.sort(key=lambda r: str(r.get("employee_name") or ""))
+    return {
+        "year": year,
+        "month": month,
+        "period_start": start_date,
+        "period_end": end_date,
+        "count": len(results),
+        "total_gross": round(sum(_num(r.get("gross_salary")) for r in results), 2),
+        "total_deductions": round(sum(_num(r.get("total_deductions")) for r in results), 2),
+        "total_net": round(sum(_num(r.get("net_salary")) for r in results), 2),
+        "employees": results,
+    }
+
+
+# ── Run payroll (create DRAFT slips for all employees missing one) ─────────
+@router.post("/salary/payroll-run")
+async def run_payroll(
+    year: int = Query(...),
+    month: int = Query(...),
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    num_days = calendar.monthrange(year, month)[1]
+    start_date = f"{year:04d}-{month:02d}-01"
+    end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
+
+    created = []
+    skipped = []
+    failed = []
+    cursor = employees_collection().find({"is_active": True})
+    async for emp in cursor:
+        employee_id = str(emp["_id"])
+        existing = await salary_slips_collection().find_one({
+            "employee_id": employee_id,
+            "period_start": start_date,
+            "period_end": end_date,
+            "status": {"$ne": "CANCELLED"},
+        })
+        if existing:
+            skipped.append({"employee_id": employee_id, "slip_id": str(existing["_id"])})
+            continue
+        try:
+            emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
+            calc = await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, "MONTHLY")
+            payload = SalarySlipCreate(
+                employee_id=employee_id,
+                period_type="MONTHLY",
+                period_start=date_cls.fromisoformat(start_date),
+                period_end=date_cls.fromisoformat(end_date),
+                basic_salary=_num(calc.get("basic_salary")),
+                adjusted_base_salary=_num(calc.get("adjusted_base_salary")),
+                base_salary_for_period=_num(calc.get("base_salary_for_period")),
+                calendar_days=int(calc.get("calendar_days") or 30),
+                working_days=int(calc.get("total_working_days") or 0),
+                worked_days=_num(calc.get("worked_days")),
+                absent_days=_num(calc.get("absent_days")),
+                leave_days=_num(calc.get("leave_days")),
+                holiday_count=int(calc.get("holiday_count") or 0),
+                weekend_count=int(calc.get("weekend_count") or 0),
+                overtime_hours=_num(calc.get("overtime_hours")),
+                overtime_rate=_num(calc.get("overtime_rate")),
+                overtime_pay=_num(calc.get("overtime_pay")),
+                extra_work_total=_num(calc.get("extra_work_total")),
+                extra_work_details=calc.get("extra_work_details") or [],
+                epf_employee=_num(calc.get("epf_employee")),
+                epf_employer=_num(calc.get("epf_employer")),
+                etf_employer=_num(calc.get("etf_employer")),
+                advance_deductions=_num(calc.get("advance_deductions")),
+                advance_details=calc.get("advance_details") or [],
+                status="DRAFT",
+            )
+            slip = await create_salary_slip(payload, current_user)
+            created.append(slip)
+        except Exception as exc:
+            failed.append({"employee_id": employee_id, "error": str(exc)})
+
+    await log_audit(
+        str(current_user.get("user_id", "")),
+        "run_payroll", "salary_slip", None,
+        details={"year": year, "month": month, "created": len(created), "skipped": len(skipped), "failed": len(failed)},
+    )
+    return {"created": created, "count": len(created), "skipped": skipped, "failed": failed}
 
 
 # ── Legacy salary compatibility ───────────────────────────────────────────

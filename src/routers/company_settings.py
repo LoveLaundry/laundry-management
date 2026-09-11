@@ -10,6 +10,7 @@ from ..router_utils import serialize, log_audit
 router = APIRouter(tags=["Company Settings"])
 
 DEFAULT_SETTINGS = {
+    "company_name": "Love Laundry",
     "working_days_per_week": 6,
     "working_days_pattern": [0, 1, 2, 3, 4, 5],
     "default_overtime_rate": 0,

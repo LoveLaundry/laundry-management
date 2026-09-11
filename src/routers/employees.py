@@ -77,16 +77,25 @@ async def create_employee(
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
-    existing_doc = await employees_collection().find_one(doc)
-    if not existing_doc:
-        count = await employees_collection().count_documents({})
-        doc["employee_code"] = f"EMP{count + 1:03d}"
-        encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
-        result = await employees_collection().insert_one(encrypted)
-        await log_audit(str(current_user.get("user_id", "")), "create", "employee", str(result.inserted_id), details={"name": payload.name})
-        encrypted["_id"] = result.inserted_id
-        return serialize(encrypted, SENSITIVE_FIELDS)
-    return {"detail": "Employee already exists"}
+    existing_doc = await employees_collection().find_one({"name_search": get_search_token(payload.name.strip())})
+    if existing_doc:
+        return {"detail": "Employee already exists"}
+
+    max_emp_num = 0
+    cursor = employees_collection().find({"employee_code": {"$regex": "^EMP\\d+$"}}, {"employee_code": 1})
+    async for c in cursor:
+        try:
+            n = int(c.get("employee_code", "EMP000")[3:])
+            if n > max_emp_num:
+                max_emp_num = n
+        except (ValueError, IndexError):
+            pass
+    doc["employee_code"] = f"EMP{max_emp_num + 1:03d}"
+    encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
+    result = await employees_collection().insert_one(encrypted)
+    await log_audit(str(current_user.get("user_id", "")), "create", "employee", str(result.inserted_id), details={"name": payload.name})
+    encrypted["_id"] = result.inserted_id
+    return serialize(encrypted, SENSITIVE_FIELDS)
 
 
 @router.put("/employees/{employee_id}")

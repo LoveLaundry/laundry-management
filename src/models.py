@@ -342,11 +342,14 @@ class SalarySlipCreate(BaseModel):
     period_end: date_cls
     basic_salary: float = 0.0
     adjusted_base_salary: float = 0.0
+    base_salary_for_period: float = 0.0
     calendar_days: int = 30
     working_days: int = 0
     worked_days: float = 0.0
     absent_days: float = 0.0
     leave_days: float = 0.0
+    holiday_count: int = 0
+    weekend_count: int = 0
     overtime_hours: float = 0.0
     overtime_rate: float = 0.0
     overtime_pay: float = 0.0
@@ -376,9 +379,12 @@ class SalarySlipCreate(BaseModel):
 class SalarySlipUpdate(BaseModel):
     basic_salary: Optional[float] = None
     adjusted_base_salary: Optional[float] = None
+    base_salary_for_period: Optional[float] = None
     worked_days: Optional[float] = None
     absent_days: Optional[float] = None
     leave_days: Optional[float] = None
+    holiday_count: Optional[int] = None
+    weekend_count: Optional[int] = None
     overtime_hours: Optional[float] = None
     overtime_rate: Optional[float] = None
     overtime_pay: Optional[float] = None
@@ -405,6 +411,7 @@ class SalarySlipUpdate(BaseModel):
 
 # ---------------- Company Settings ----------------
 class CompanySettingsUpdate(BaseModel):
+    company_name: Optional[str] = None
     working_days_per_week: Optional[int] = None
     working_days_pattern: Optional[List[int]] = None
     default_overtime_rate: Optional[float] = None
