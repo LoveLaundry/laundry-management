@@ -63,7 +63,12 @@ async def _get_holiday_dates(start: str, end: str) -> set:
     end_date = date_cls.fromisoformat(end)
     result: set = set()
 
-    cursor = holidays_collection().find({"date": {"$lte": end}}).sort("date", 1)
+    cursor = holidays_collection().find({
+        "$or": [
+            {"date": {"$lte": end}},
+            {"is_recurring": True, "date": {"$gt": end}},
+        ]
+    }).sort("date", 1)
     async for doc in cursor:
         h_date = doc.get("date")
         if not h_date:
