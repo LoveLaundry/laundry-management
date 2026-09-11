@@ -174,6 +174,7 @@ class EmployeeCreate(BaseModel):
     department: str = "GENERAL"
     phone: Optional[str] = None
     nic: Optional[str] = None
+    salary_type: str = "MONTHLY"
     basic_salary: float = 0.0
     daily_rate: float = 0.0
     epf_rate: float = 0.0
@@ -189,6 +190,7 @@ class EmployeeUpdate(BaseModel):
     department: Optional[str] = None
     phone: Optional[str] = None
     nic: Optional[str] = None
+    salary_type: Optional[str] = None
     basic_salary: Optional[float] = None
     daily_rate: Optional[float] = None
     epf_rate: Optional[float] = None
@@ -241,7 +243,161 @@ class AttendanceCreate(BaseModel):
     date: date_cls
     status: str = "PRESENT"
     overtime_hours: float = 0.0
+    check_in_time: Optional[str] = None
+    check_out_time: Optional[str] = None
     notes: Optional[str] = None
+
+
+# ---------------- Salary Advances ----------------
+class AdvanceCreate(BaseModel):
+    employee_id: str
+    amount: float
+    date: date_cls
+    reason: Optional[str] = None
+    reference: Optional[str] = None
+
+
+class AdvanceUpdate(BaseModel):
+    amount: Optional[float] = None
+    date: Optional[date_cls] = None
+    reason: Optional[str] = None
+    reference: Optional[str] = None
+    status: Optional[str] = None
+
+
+class AdvanceDeduct(BaseModel):
+    advance_id: str
+    salary_slip_id: Optional[str] = None
+    amount_deducted: float
+    reason: Optional[str] = None
+
+
+# ---------------- Holidays ----------------
+class HolidayCreate(BaseModel):
+    name: str
+    date: date_cls
+    description: Optional[str] = None
+    is_recurring: bool = False
+
+
+class HolidayUpdate(BaseModel):
+    name: Optional[str] = None
+    date: Optional[date_cls] = None
+    description: Optional[str] = None
+    is_recurring: Optional[bool] = None
+
+
+# ---------------- Extra Work ----------------
+class ExtraWorkCategoryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    rate: float = 0.0
+    calculation_method: str = "FIXED"
+    unit: str = "DAY"
+    is_active: bool = True
+
+
+class ExtraWorkCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    rate: Optional[float] = None
+    calculation_method: Optional[str] = None
+    unit: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ExtraWorkRecordCreate(BaseModel):
+    employee_id: str
+    category_id: str
+    date: date_cls
+    units: float = 1.0
+    amount: float = 0.0
+    notes: Optional[str] = None
+
+
+class ExtraWorkRecordUpdate(BaseModel):
+    category_id: Optional[str] = None
+    date: Optional[date_cls] = None
+    units: Optional[float] = None
+    amount: Optional[float] = None
+    notes: Optional[str] = None
+
+
+# ---------------- Salary Slip (Enhanced) ----------------
+class SalarySlipCreate(BaseModel):
+    employee_id: str
+    period_type: str = "MONTHLY"
+    period_start: date_cls
+    period_end: date_cls
+    basic_salary: float = 0.0
+    adjusted_base_salary: float = 0.0
+    calendar_days: int = 30
+    working_days: int = 0
+    worked_days: float = 0.0
+    absent_days: float = 0.0
+    leave_days: float = 0.0
+    overtime_hours: float = 0.0
+    overtime_rate: float = 0.0
+    overtime_pay: float = 0.0
+    allowances: float = 0.0
+    allowance_details: List[Dict[str, Any]] = Field(default_factory=list)
+    extra_work_total: float = 0.0
+    extra_work_details: List[Dict[str, Any]] = Field(default_factory=list)
+    epf_employee: float = 0.0
+    epf_employer: float = 0.0
+    etf_employer: float = 0.0
+    total_earnings: float = 0.0
+    advance_deductions: float = 0.0
+    advance_details: List[Dict[str, Any]] = Field(default_factory=list)
+    loan_deduction: float = 0.0
+    other_deductions: float = 0.0
+    total_deductions: float = 0.0
+    gross_salary: float = 0.0
+    net_salary: float = 0.0
+    amount_paid: float = 0.0
+    paid: bool = False
+    paid_date: Optional[date_cls] = None
+    status: str = "DRAFT"
+    notes: Optional[str] = None
+    slip_number: Optional[str] = None
+
+
+class SalarySlipUpdate(BaseModel):
+    basic_salary: Optional[float] = None
+    adjusted_base_salary: Optional[float] = None
+    worked_days: Optional[float] = None
+    absent_days: Optional[float] = None
+    leave_days: Optional[float] = None
+    overtime_hours: Optional[float] = None
+    overtime_rate: Optional[float] = None
+    overtime_pay: Optional[float] = None
+    allowances: Optional[float] = None
+    allowance_details: Optional[List[Dict[str, Any]]] = None
+    extra_work_total: Optional[float] = None
+    extra_work_details: Optional[List[Dict[str, Any]]] = None
+    epf_employee: Optional[float] = None
+    epf_employer: Optional[float] = None
+    etf_employer: Optional[float] = None
+    advance_deductions: Optional[float] = None
+    advance_details: Optional[List[Dict[str, Any]]] = None
+    loan_deduction: Optional[float] = None
+    other_deductions: Optional[float] = None
+    total_deductions: Optional[float] = None
+    gross_salary: Optional[float] = None
+    net_salary: Optional[float] = None
+    amount_paid: Optional[float] = None
+    paid: Optional[bool] = None
+    paid_date: Optional[date_cls] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+# ---------------- Company Settings ----------------
+class CompanySettingsUpdate(BaseModel):
+    working_days_per_week: Optional[int] = None
+    working_days_pattern: Optional[List[int]] = None
+    default_overtime_rate: Optional[float] = None
+    salary_basis_days: Optional[int] = None
 
 
 # ---------------- Expenses ----------------

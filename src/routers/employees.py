@@ -64,6 +64,7 @@ async def create_employee(
         "department": payload.department,
         "phone": (payload.phone or "").strip() or None,
         "nic": (payload.nic or "").strip() or None,
+        "salary_type": payload.salary_type,
         "basic_salary": round(payload.basic_salary, 2),
         "daily_rate": round(payload.daily_rate, 2),
         "epf_rate": round(payload.epf_rate, 2),
@@ -101,6 +102,8 @@ async def update_employee(
             updates["joined_date"] = val.isoformat() if hasattr(val, "isoformat") else val
         elif key in ("basic_salary", "daily_rate", "epf_rate", "etf_rate") and val is not None:
             updates[key] = round(float(val), 2)
+        elif key == "salary_type":
+            updates[key] = val
         else:
             updates[key] = val
     updates["updated_at"] = datetime.now(timezone.utc)

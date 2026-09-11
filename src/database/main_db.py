@@ -18,6 +18,12 @@ PAYMENTS = "payments"
 EMPLOYEES = "employees"
 SALARIES = "salaries"
 ATTENDANCE = "attendance"
+SALARY_ADVANCES = "salary_advances"
+SALARY_SLIPS = "salary_slips"
+HOLIDAYS = "holidays"
+EXTRA_WORK_CATEGORIES = "extra_work_categories"
+EXTRA_WORK_RECORDS = "extra_work_records"
+COMPANY_SETTINGS = "company_settings"
 EXPENSE_CATEGORIES = "expense_categories"
 EXPENSES = "expenses"
 IMPORTS = "imports"
@@ -68,6 +74,30 @@ def attendance_collection() -> AsyncIOMotorCollection:
     return _db()[ATTENDANCE]
 
 
+def salary_advances_collection() -> AsyncIOMotorCollection:
+    return _db()[SALARY_ADVANCES]
+
+
+def salary_slips_collection() -> AsyncIOMotorCollection:
+    return _db()[SALARY_SLIPS]
+
+
+def holidays_collection() -> AsyncIOMotorCollection:
+    return _db()[HOLIDAYS]
+
+
+def extra_work_categories_collection() -> AsyncIOMotorCollection:
+    return _db()[EXTRA_WORK_CATEGORIES]
+
+
+def extra_work_records_collection() -> AsyncIOMotorCollection:
+    return _db()[EXTRA_WORK_RECORDS]
+
+
+def company_settings_collection() -> AsyncIOMotorCollection:
+    return _db()[COMPANY_SETTINGS]
+
+
 def expense_categories_collection() -> AsyncIOMotorCollection:
     return _db()[EXPENSE_CATEGORIES]
 
@@ -112,6 +142,29 @@ async def ensure_indexes() -> None:
 
     await attendance_collection().create_index("employee_id")
     await attendance_collection().create_index("date")
+    await attendance_collection().create_index([("employee_id", 1), ("date", 1)], unique=True)
+
+    await salary_advances_collection().create_index("employee_id")
+    await salary_advances_collection().create_index("status")
+    await salary_advances_collection().create_index("date")
+
+    await salary_slips_collection().create_index("employee_id")
+    await salary_slips_collection().create_index([("employee_id", 1), ("period_start", 1)])
+    await salary_slips_collection().create_index("slip_number")
+    await salary_slips_collection().create_index("status")
+
+    await holidays_collection().create_index("date")
+    await holidays_collection().create_index([("date", 1)], unique=True)
+
+    await extra_work_categories_collection().create_index("name")
+    await extra_work_categories_collection().create_index("is_active")
+
+    await extra_work_records_collection().create_index("employee_id")
+    await extra_work_records_collection().create_index("category_id")
+    await extra_work_records_collection().create_index("date")
+    await extra_work_records_collection().create_index([("employee_id", 1), ("date", 1)])
+
+    await company_settings_collection().create_index("key")
 
     await expense_categories_collection().create_index("name_search")
 
