@@ -318,6 +318,7 @@ async def _calculate_period_salary(
 
 # ── Salary Calculation Endpoint (monthly) ─────────────────────────────────
 @router.post("/salary/calculate")
+@router.get("/salary/calculate")
 async def calculate_salary(
     employee_id: str = Query(...),
     year: int = Query(...),
@@ -338,6 +339,7 @@ async def calculate_salary(
 
 # ── Period / Weekly Salary Calculation ────────────────────────────────────
 @router.post("/salary/calculate-period")
+@router.get("/salary/calculate-period")
 async def calculate_period_salary(
     employee_id: str = Query(...),
     period_start: str = Query(...),
