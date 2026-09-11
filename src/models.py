@@ -199,6 +199,7 @@ class EmployeeUpdate(BaseModel):
     joined_date: Optional[date_cls] = None
     leaving_date: Optional[date_cls] = None
     status: Optional[str] = None
+    is_active: Optional[bool] = None
     notes: Optional[str] = None
 
 

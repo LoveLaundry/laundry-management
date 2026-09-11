@@ -136,6 +136,26 @@ async def delete_employee(
     return {"success": True}
 
 
+@router.post("/employees/{employee_id}/activate")
+async def activate_employee(
+    employee_id: str,
+    current_user: dict = Depends(require_capability("employee:write")),
+):
+    oid = ObjectId(employee_id) if ObjectId.is_valid(employee_id) else None
+    if not oid:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    existing = await employees_collection().find_one({"_id": oid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    updates: dict = {"is_active": True, "status": "ACTIVE", "updated_at": datetime.now(timezone.utc)}
+    if existing.get("leaving_date"):
+        updates["leaving_date"] = None
+    await employees_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(str(current_user.get("user_id", "")), "activate", "employee", employee_id, details={})
+    updated = await employees_collection().find_one({"_id": oid})
+    return serialize(updated, SENSITIVE_FIELDS)
+
+
 # ---------------- Salaries ----------------
 def _payroll_month(month: str, year: Optional[int]) -> str:
     m = int(month)
