@@ -177,6 +177,8 @@ class EmployeeCreate(BaseModel):
     salary_type: str = "MONTHLY"
     basic_salary: float = 0.0
     daily_rate: float = 0.0
+    allowance: float = 0.0
+    allowance_type: str = "FIXED"
     epf_rate: float = 0.0
     etf_rate: float = 0.0
     joined_date: Optional[date_cls] = None
@@ -194,6 +196,8 @@ class EmployeeUpdate(BaseModel):
     salary_type: Optional[str] = None
     basic_salary: Optional[float] = None
     daily_rate: Optional[float] = None
+    allowance: Optional[float] = None
+    allowance_type: Optional[str] = None
     epf_rate: Optional[float] = None
     etf_rate: Optional[float] = None
     joined_date: Optional[date_cls] = None

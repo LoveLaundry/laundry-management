@@ -67,6 +67,8 @@ async def create_employee(
         "salary_type": payload.salary_type,
         "basic_salary": round(payload.basic_salary, 2),
         "daily_rate": round(payload.daily_rate, 2),
+        "allowance": round(payload.allowance, 2),
+        "allowance_type": (payload.allowance_type or "FIXED").upper(),
         "epf_rate": round(payload.epf_rate, 2),
         "etf_rate": round(payload.etf_rate, 2),
         "joined_date": payload.joined_date.isoformat() if payload.joined_date else None,
@@ -115,8 +117,10 @@ async def update_employee(
     for key, val in data.items():
         if key in ("joined_date", "leaving_date") and val is not None:
             updates[key] = val.isoformat() if hasattr(val, "isoformat") else val
-        elif key in ("basic_salary", "daily_rate", "epf_rate", "etf_rate") and val is not None:
+        elif key in ("basic_salary", "daily_rate", "epf_rate", "etf_rate", "allowance") and val is not None:
             updates[key] = round(float(val), 2)
+        elif key == "allowance_type":
+            updates[key] = val.upper()
         elif key == "salary_type":
             updates[key] = val
         else:

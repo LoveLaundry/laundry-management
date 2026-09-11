@@ -233,6 +233,20 @@ async def _calculate_period_salary(
     if overtime_rate > 0 and total_ot_hours > 0:
         overtime_pay = round(total_ot_hours * overtime_rate, 2)
 
+    allowance_fixed = _num(emp.get("allowance"))
+    allowance_type = (emp.get("allowance_type") or "FIXED").upper()
+    if allowance_fixed > 0:
+        if allowance_type == "DAYS":
+            if salary_type == "MONTHLY" and basic_salary > 0:
+                ratio = round(base_salary_for_period / basic_salary, 4)
+            else:
+                ratio = round(effective_working_days / max(effective_num_days, 1), 4)
+            allowance_for_period = round(allowance_fixed * ratio, 2)
+        else:
+            allowance_for_period = round(allowance_fixed, 2)
+    else:
+        allowance_for_period = 0.0
+
     extra_work_records = await _get_extra_work(employee_id, start_date, end_date)
     extra_work_total = 0.0
     extra_work_details = []
@@ -265,7 +279,7 @@ async def _calculate_period_salary(
             "reason": adv.get("reason"),
         })
 
-    gross_salary = round(base_salary_for_period + overtime_pay + extra_work_total, 2)
+    gross_salary = round(base_salary_for_period + overtime_pay + extra_work_total + allowance_for_period, 2)
     total_deductions = round(epf_employee + total_advance_deductions, 2)
     net_salary = round(gross_salary - total_deductions, 2)
 
@@ -299,6 +313,9 @@ async def _calculate_period_salary(
         "daily_rate": daily_rate,
         "adjusted_base_salary": adjusted_base,
         "base_salary_for_period": base_salary_for_period,
+        "allowance": allowance_fixed,
+        "allowance_type": allowance_type,
+        "allowance_for_period": allowance_for_period,
         "extra_work_total": extra_work_total,
         "extra_work_details": extra_work_details,
         "epf_rate": epf_rate,
@@ -950,6 +967,7 @@ async def run_payroll(
                 overtime_pay=_num(calc.get("overtime_pay")),
                 extra_work_total=_num(calc.get("extra_work_total")),
                 extra_work_details=calc.get("extra_work_details") or [],
+                allowances=_num(calc.get("allowance_for_period")),
                 epf_employee=_num(calc.get("epf_employee")),
                 epf_employer=_num(calc.get("epf_employer")),
                 etf_employer=_num(calc.get("etf_employer")),
