@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..auth_helper import require_capability
 from ..database.main_db import employees_collection, salaries_collection, attendance_collection
 from ..models import EmployeeCreate, EmployeeUpdate, SalaryCreate, SalaryUpdate, AttendanceCreate, AttendanceUpdate
-from ..crypto_helper import encrypt_dict, decrypt_dict, get_search_token
+from ..crypto_helper import encrypt_dict, decrypt_dict, get_search_token, encrypt_fields_for_update
 from ..router_utils import serialize, log_audit
 from ..error_responses import BadRequestError, ConflictError
 
@@ -116,6 +116,8 @@ async def update_employee(
     data = payload.model_dump(exclude_none=True)
     updates = {}
     for key, val in data.items():
+        if isinstance(val, str) and val == "":
+            continue
         if key in ("joined_date", "leaving_date") and val is not None:
             updates[key] = val.isoformat() if hasattr(val, "isoformat") else val
         elif key in ("basic_salary", "daily_rate", "epf_rate", "etf_rate", "allowance") and val is not None:
@@ -126,8 +128,12 @@ async def update_employee(
             updates[key] = val.upper()
         elif key == "salary_type":
             updates[key] = val
+        elif key in SENSITIVE_FIELDS:
+            updates[key] = val
         else:
             updates[key] = val
+    if any(k in SENSITIVE_FIELDS for k in updates):
+        updates = encrypt_fields_for_update(existing, updates, SENSITIVE_FIELDS)
     updates["updated_at"] = datetime.now(timezone.utc)
     if len(updates) > 1:
         await employees_collection().update_one({"_id": oid}, {"$set": updates})

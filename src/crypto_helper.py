@@ -129,3 +129,53 @@ def decrypt_dict(encrypted_data: dict, sensitive_fields: list) -> dict:
             decrypted_data[key] = val
 
     return decrypted_data
+
+
+def encrypt_fields_for_update(current_doc: dict, updates: dict, sensitive_fields: list) -> dict:
+    """Encrypt sensitive fields in `updates` for a partial update, reusing the
+    document's existing DEK and refreshing search tokens. Fields not in
+    `sensitive_fields` pass through unchanged."""
+    if not updates:
+        return updates
+
+    meta = current_doc.get("encryption_metadata")
+    if not meta:
+        return updates
+
+    wrapped_dek = meta["wrappedDek"]
+    try:
+        aesgcm_kek = AESGCM(KEK)
+        dek_nonce = bytes.fromhex(wrapped_dek["nonce"])
+        wrapped_dek_bytes = bytes.fromhex(wrapped_dek["ciphertext"])
+        dek = aesgcm_kek.decrypt(dek_nonce, wrapped_dek_bytes, None)
+    except Exception as e:
+        raise ValueError(f"Failed to unwrap DEK: {str(e)}")
+
+    out = {}
+    for key, val in updates.items():
+        if key in sensitive_fields and val is not None:
+            if not isinstance(val, str):
+                val_str = json.dumps(val)
+                is_json = True
+            else:
+                val_str = val
+                is_json = False
+
+            enc_field = encrypt_field(val_str, dek)
+            enc_field["is_json"] = is_json
+            out[key] = enc_field
+
+            if key == "name":
+                out["name_search"] = get_search_token(val_str)
+            elif key == "customer_name":
+                out["customer_name_search"] = get_search_token(val_str)
+            elif key == "email":
+                out["email_search"] = get_search_token(val_str)
+            elif key == "phone":
+                out["phone_search"] = get_search_token(val_str)
+            elif key == "invoice_number":
+                out["invoice_search"] = get_search_token(val_str)
+        else:
+            out[key] = val
+
+    return out
