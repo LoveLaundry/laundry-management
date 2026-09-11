@@ -60,9 +60,8 @@ async def _get_company_settings() -> dict:
     }
 
 
-async def _get_holiday_dates(year: int, month: int) -> set:
-    prefix = f"{year:04d}-{month:02d}-"
-    cursor = holidays_collection().find({"date": {"$regex": f"^{prefix}"}})
+async def _get_holiday_dates(start: str, end: str) -> set:
+    cursor = holidays_collection().find({"date": {"$gte": start, "$lte": end}})
     dates = set()
     async for doc in cursor:
         dates.add(doc["date"])
@@ -95,30 +94,16 @@ async def _get_outstanding_advances(employee_id: str) -> list:
     return [doc async for doc in cursor]
 
 
-def _count_working_days(year: int, month: int, working_days_pattern: list) -> int:
-    num_days = calendar.monthrange(year, month)[1]
-    count = 0
-    for day in range(1, num_days + 1):
-        dow = date_cls(year, month, day).weekday()
-        if dow in working_days_pattern:
-            count += 1
-    return count
-
-
-# ── Salary Calculation Endpoint ───────────────────────────────────────────
-@router.post("/salary/calculate")
-async def calculate_salary(
-    employee_id: str = Query(...),
-    year: int = Query(...),
-    month: int = Query(...),
-    current_user: dict = Depends(require_capability("salary:read")),
-):
-    emp_oid = _parse_oid(employee_id, "employee")
-    emp = await employees_collection().find_one({"_id": emp_oid})
-    if not emp:
-        raise NotFoundError("Employee", employee_id)
-
-    emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
+# ── Generic Period Salary Calculation ─────────────────────────────────────
+async def _calculate_period_salary(
+    emp: dict,
+    emp_decrypted: dict,
+    start_date: str,
+    end_date: str,
+    period_type: str = "MONTHLY",
+) -> dict:
+    """Calculate salary for an arbitrary date period (monthly / weekly / custom)."""
+    employee_id = str(emp["_id"])
     salary_type = emp.get("salary_type", "MONTHLY")
     basic_salary = _num(emp.get("basic_salary"))
     daily_rate = _num(emp.get("daily_rate"))
@@ -128,44 +113,69 @@ async def calculate_salary(
     settings = await _get_company_settings()
     working_days_pattern = settings.get("working_days_pattern", [0, 1, 2, 3, 4, 5])
     salary_basis_days = settings.get("salary_basis_days", 30)
+    basis_days = max(_num(emp.get("salary_basis_days")), salary_basis_days, 1)
 
-    num_days = calendar.monthrange(year, month)[1]
-    start_date = f"{year:04d}-{month:02d}-01"
-    end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
+    sdt = date_cls.fromisoformat(start_date)
+    edt = date_cls.fromisoformat(end_date)
+    if edt < sdt:
+        raise BadRequestError("Period end must be after period start")
+    num_days = (edt - sdt).days + 1
 
     joined_date_str = emp.get("joined_date")
-    effective_start_day = 1
+    leaving_date_str = emp.get("leaving_date")
+
+    effective_start = sdt
     if joined_date_str:
         try:
-            jy, jm, jd = map(int, joined_date_str.split("-"))
-            if jy == year and jm == month:
-                effective_start_day = jd
+            jd = date_cls.fromisoformat(joined_date_str)
+            if jd > effective_start:
+                effective_start = jd
         except (ValueError, AttributeError):
             pass
 
-    holiday_dates = await _get_holiday_dates(year, month)
+    effective_end = edt
+    if leaving_date_str:
+        try:
+            ld = date_cls.fromisoformat(leaving_date_str)
+            if ld < effective_end:
+                effective_end = ld
+        except (ValueError, AttributeError):
+            pass
+
+    if effective_end < effective_start:
+        effective_end = effective_start
+
+    holiday_dates = await _get_holiday_dates(start_date, end_date)
     attendance_records = await _get_attendance(employee_id, start_date, end_date)
 
-    total_working_days = _count_working_days(year, month, working_days_pattern)
+    total_working_days = 0
     worked_days = 0.0
     absent_days = 0.0
     leave_days = 0.0
+    holiday_count = 0
+    weekend_count = 0
     total_ot_hours = 0.0
 
     attendance_by_date = {}
     for rec in attendance_records:
         attendance_by_date[rec["date"]] = rec
 
-    for day in range(effective_start_day, num_days + 1):
-        date_str = f"{year:04d}-{month:02d}-{day:02d}"
-        dow = date_cls(year, month, day).weekday()
+    day = effective_start
+    while day <= effective_end:
+        date_str = day.isoformat()
+        dow = day.weekday()
 
         if dow not in working_days_pattern:
+            weekend_count += 1
+            day = date_cls.fromordinal(day.toordinal() + 1)
             continue
 
         if date_str in holiday_dates:
+            holiday_count += 1
+            day = date_cls.fromordinal(day.toordinal() + 1)
             continue
 
+        total_working_days += 1
         att = attendance_by_date.get(date_str)
         if att:
             status = att.get("status", "ABSENT")
@@ -181,21 +191,24 @@ async def calculate_salary(
             total_ot_hours += _num(att.get("overtime_hours"))
         else:
             absent_days += 1
+        day = date_cls.fromordinal(day.toordinal() + 1)
 
     effective_working_days = worked_days + leave_days
 
-    adjusted_base = round(basic_salary * num_days / salary_basis_days, 2) if salary_type == "MONTHLY" else 0
-    base_salary_for_period = round(adjusted_base * effective_working_days / num_days, 2) if salary_type == "MONTHLY" else 0
+    effective_num_days = (effective_end - effective_start).days + 1
+
+    adjusted_base = round(basic_salary * effective_num_days / basis_days, 2) if salary_type == "MONTHLY" else 0
+    base_salary_for_period = round(adjusted_base * effective_working_days / effective_num_days, 2) if salary_type == "MONTHLY" else 0
 
     if salary_type == "DAILY":
         base_salary_for_period = round(daily_rate * worked_days, 2)
-        adjusted_base = daily_rate * settings.get("working_days_per_week", 6)
+        adjusted_base = basic_salary or daily_rate * settings.get("working_days_per_week", 6)
     elif salary_type == "WEEKLY":
         base_salary_for_period = round(daily_rate * worked_days, 2)
-        adjusted_base = base_salary_for_period
+        adjusted_base = base_salary_for_period if worked_days > 0 else round(daily_rate * settings.get("working_days_per_week", 6), 2)
 
     overtime_pay = 0.0
-    overtime_rate = settings.get("default_overtime_rate", 0)
+    overtime_rate = _num(emp.get("overtime_rate")) or settings.get("default_overtime_rate", 0)
     if overtime_rate > 0 and total_ot_hours > 0:
         overtime_pay = round(total_ot_hours * overtime_rate, 2)
 
@@ -246,15 +259,18 @@ async def calculate_salary(
         "employee_id": employee_id,
         "employee_name": emp_decrypted.get("name"),
         "salary_type": salary_type,
-        "period_type": "MONTHLY",
+        "period_type": period_type,
         "period_start": start_date,
         "period_end": end_date,
-        "calendar_days": num_days,
-        "effective_start_day": effective_start_day,
+        "calendar_days": effective_num_days,
+        "effective_start": effective_start.isoformat(),
+        "effective_end": effective_end.isoformat(),
         "total_working_days": total_working_days,
         "worked_days": worked_days,
         "absent_days": absent_days,
         "leave_days": leave_days,
+        "holiday_count": holiday_count,
+        "weekend_count": weekend_count,
         "overtime_hours": total_ot_hours,
         "overtime_rate": overtime_rate,
         "overtime_pay": overtime_pay,
@@ -277,6 +293,44 @@ async def calculate_salary(
         "existing_slip_id": str(existing_slip["_id"]) if existing_slip else None,
         "existing_slip_status": existing_slip.get("status") if existing_slip else None,
     }
+
+
+# ── Salary Calculation Endpoint (monthly) ─────────────────────────────────
+@router.post("/salary/calculate")
+async def calculate_salary(
+    employee_id: str = Query(...),
+    year: int = Query(...),
+    month: int = Query(...),
+    current_user: dict = Depends(require_capability("salary:read")),
+):
+    emp_oid = _parse_oid(employee_id, "employee")
+    emp = await employees_collection().find_one({"_id": emp_oid})
+    if not emp:
+        raise NotFoundError("Employee", employee_id)
+
+    emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
+    num_days = calendar.monthrange(year, month)[1]
+    start_date = f"{year:04d}-{month:02d}-01"
+    end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
+    return await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, period_type="MONTHLY")
+
+
+# ── Period / Weekly Salary Calculation ────────────────────────────────────
+@router.post("/salary/calculate-period")
+async def calculate_period_salary(
+    employee_id: str = Query(...),
+    period_start: str = Query(...),
+    period_end: str = Query(...),
+    period_type: str = Query("MONTHLY"),
+    current_user: dict = Depends(require_capability("salary:read")),
+):
+    emp_oid = _parse_oid(employee_id, "employee")
+    emp = await employees_collection().find_one({"_id": emp_oid})
+    if not emp:
+        raise NotFoundError("Employee", employee_id)
+
+    emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
+    return await _calculate_period_salary(emp, emp_decrypted, period_start, period_end, period_type=period_type)
 
 
 # ── Generate / Save Salary Slip ───────────────────────────────────────────
@@ -306,8 +360,11 @@ async def create_salary_slip(
     period_start_str = payload.period_start.isoformat() if hasattr(payload.period_start, "isoformat") else str(payload.period_start)
     period_end_str = payload.period_end.isoformat() if hasattr(payload.period_end, "isoformat") else str(payload.period_end)
 
-    slip_count = await salary_slips_collection().count_documents({})
-    slip_number = f"{emp_name[:3].upper()}-{period_start_str[:7].replace('-', '')}-{slip_count + 1:04d}"
+    slip_count_for_emp = await salary_slips_collection().count_documents({
+        "employee_id": payload.employee_id,
+    })
+    emp_code = emp.get("employee_code") or f"EMP{slip_count_for_emp + 1:03d}"
+    slip_number = f"{emp_code}-{period_start_str[:7].replace('-', '')}-{slip_count_for_emp + 1:04d}"
 
     total_earnings = round(
         _num(payload.adjusted_base_salary) * _num(payload.worked_days) / max(_num(payload.calendar_days), 1)

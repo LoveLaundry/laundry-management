@@ -180,6 +180,7 @@ class EmployeeCreate(BaseModel):
     epf_rate: float = 0.0
     etf_rate: float = 0.0
     joined_date: Optional[date_cls] = None
+    leaving_date: Optional[date_cls] = None
     status: str = "ACTIVE"
     notes: Optional[str] = None
 
@@ -196,6 +197,7 @@ class EmployeeUpdate(BaseModel):
     epf_rate: Optional[float] = None
     etf_rate: Optional[float] = None
     joined_date: Optional[date_cls] = None
+    leaving_date: Optional[date_cls] = None
     status: Optional[str] = None
     notes: Optional[str] = None
 
@@ -243,6 +245,14 @@ class AttendanceCreate(BaseModel):
     date: date_cls
     status: str = "PRESENT"
     overtime_hours: float = 0.0
+    check_in_time: Optional[str] = None
+    check_out_time: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class AttendanceUpdate(BaseModel):
+    status: Optional[str] = None
+    overtime_hours: Optional[float] = None
     check_in_time: Optional[str] = None
     check_out_time: Optional[str] = None
     notes: Optional[str] = None

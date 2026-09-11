@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth_helper import require_capability
 from ..database.main_db import employees_collection, salaries_collection, attendance_collection
-from ..models import EmployeeCreate, EmployeeUpdate, SalaryCreate, SalaryUpdate, AttendanceCreate
+from ..models import EmployeeCreate, EmployeeUpdate, SalaryCreate, SalaryUpdate, AttendanceCreate, AttendanceUpdate
 from ..crypto_helper import encrypt_dict, decrypt_dict, get_search_token
 from ..router_utils import serialize, log_audit
 from ..error_responses import BadRequestError, ConflictError
@@ -70,17 +70,23 @@ async def create_employee(
         "epf_rate": round(payload.epf_rate, 2),
         "etf_rate": round(payload.etf_rate, 2),
         "joined_date": payload.joined_date.isoformat() if payload.joined_date else None,
+        "leaving_date": payload.leaving_date.isoformat() if payload.leaving_date else None,
         "status": payload.status,
         "is_active": True,
         "notes": (payload.notes or "").strip() or None,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
-    encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
-    result = await employees_collection().insert_one(encrypted)
-    await log_audit(str(current_user.get("user_id", "")), "create", "employee", str(result.inserted_id), details={"name": payload.name})
-    encrypted["_id"] = result.inserted_id
-    return serialize(encrypted, SENSITIVE_FIELDS)
+    existing_doc = await employees_collection().find_one(doc)
+    if not existing_doc:
+        count = await employees_collection().count_documents({})
+        doc["employee_code"] = f"EMP{count + 1:03d}"
+        encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
+        result = await employees_collection().insert_one(encrypted)
+        await log_audit(str(current_user.get("user_id", "")), "create", "employee", str(result.inserted_id), details={"name": payload.name})
+        encrypted["_id"] = result.inserted_id
+        return serialize(encrypted, SENSITIVE_FIELDS)
+    return {"detail": "Employee already exists"}
 
 
 @router.put("/employees/{employee_id}")
@@ -98,8 +104,8 @@ async def update_employee(
     data = payload.model_dump(exclude_none=True)
     updates = {}
     for key, val in data.items():
-        if key == "joined_date" and val is not None:
-            updates["joined_date"] = val.isoformat() if hasattr(val, "isoformat") else val
+        if key in ("joined_date", "leaving_date") and val is not None:
+            updates[key] = val.isoformat() if hasattr(val, "isoformat") else val
         elif key in ("basic_salary", "daily_rate", "epf_rate", "etf_rate") and val is not None:
             updates[key] = round(float(val), 2)
         elif key == "salary_type":
@@ -293,9 +299,55 @@ async def create_attendance(
         "date": payload.date.isoformat(),
         "status": payload.status,
         "overtime_hours": round(payload.overtime_hours, 2),
+        "check_in_time": payload.check_in_time,
+        "check_out_time": payload.check_out_time,
         "notes": (payload.notes or "").strip() or None,
         "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
     }
-    result = await attendance_collection().insert_one(doc)
-    doc["_id"] = result.inserted_id
-    return serialize(doc, ["notes"])
+    await attendance_collection().update_one(
+        {"employee_id": employee_id, "date": doc["date"]},
+        {"$set": {k: v for k, v in doc.items() if k not in ("employee_id", "date", "created_at")}, "$setOnInsert": {"employee_id": employee_id, "date": doc["date"], "created_at": doc["created_at"]}},
+        upsert=True,
+    )
+    saved = await attendance_collection().find_one({"employee_id": employee_id, "date": doc["date"]})
+    return serialize(saved, ["notes"])
+
+
+@router.put("/attendance/{attendance_id}")
+async def update_attendance(
+    attendance_id: str,
+    payload: AttendanceUpdate,
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    aoid = ObjectId(attendance_id) if ObjectId.is_valid(attendance_id) else None
+    if not aoid:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    existing = await attendance_collection().find_one({"_id": aoid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+
+    updates = payload.model_dump(exclude_none=True)
+    if "overtime_hours" in updates:
+        updates["overtime_hours"] = round(float(updates["overtime_hours"]), 2)
+    if len(updates) > 0:
+        await attendance_collection().update_one({"_id": aoid}, {"$set": updates})
+    await log_audit(str(current_user.get("user_id", "")), "update", "attendance", attendance_id, details={})
+    updated = await attendance_collection().find_one({"_id": aoid})
+    return serialize(updated, ["notes"])
+
+
+@router.delete("/attendance/{attendance_id}")
+async def delete_attendance(
+    attendance_id: str,
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    aoid = ObjectId(attendance_id) if ObjectId.is_valid(attendance_id) else None
+    if not aoid:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    existing = await attendance_collection().find_one({"_id": aoid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    await attendance_collection().delete_one({"_id": aoid})
+    await log_audit(str(current_user.get("user_id", "")), "delete", "attendance", attendance_id, details={})
+    return {"success": True}
