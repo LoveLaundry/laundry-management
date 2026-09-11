@@ -261,9 +261,17 @@ async def _calculate_period_salary(
             "amount": ew.get("amount"),
         })
 
-    epf_employee = round(base_salary_for_period * epf_rate / 100, 2) if epf_rate > 0 else 0
-    epf_employer = round(base_salary_for_period * epf_rate / 100, 2) if epf_rate > 0 else 0
-    etf_employer = round(base_salary_for_period * etf_rate / 100, 2) if etf_rate > 0 else 0
+    epf_employee = 0.0
+    epf_employer = 0.0
+    etf_employer = 0.0
+    epf_base = (emp.get("epf_base") or "ADJUSTED").upper()
+    epf_basis = round(basic_salary, 2) if epf_base == "FULL" else base_salary_for_period
+    etf_basis = epf_basis
+    if epf_rate > 0:
+        epf_employee = round(epf_basis * epf_rate / 100, 2)
+        epf_employer = round(epf_basis * epf_rate / 100, 2)
+    if etf_rate > 0:
+        etf_employer = round(etf_basis * etf_rate / 100, 2)
 
     outstanding_advances = await _get_outstanding_advances(employee_id)
     total_advance_deductions = 0.0
@@ -320,6 +328,8 @@ async def _calculate_period_salary(
         "extra_work_details": extra_work_details,
         "epf_rate": epf_rate,
         "etf_rate": etf_rate,
+        "epf_base": epf_base,
+        "epf_basis": epf_basis,
         "epf_employee": epf_employee,
         "epf_employer": epf_employer,
         "etf_employer": etf_employer,
@@ -459,6 +469,7 @@ async def create_salary_slip(
         "epf_employee": round(_num(payload.epf_employee), 2),
         "epf_employer": round(_num(payload.epf_employer), 2),
         "etf_employer": round(_num(payload.etf_employer), 2),
+        "epf_base": (payload.epf_base or "ADJUSTED").upper(),
         "total_earnings": total_earnings,
         "advance_deductions": round(_num(payload.advance_deductions), 2),
         "advance_details": payload.advance_details or [],
@@ -971,6 +982,7 @@ async def run_payroll(
                 epf_employee=_num(calc.get("epf_employee")),
                 epf_employer=_num(calc.get("epf_employer")),
                 etf_employer=_num(calc.get("etf_employer")),
+                epf_base=calc.get("epf_base") or "ADJUSTED",
                 advance_deductions=_num(calc.get("advance_deductions")),
                 advance_details=calc.get("advance_details") or [],
                 status="DRAFT",

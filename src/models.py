@@ -181,6 +181,7 @@ class EmployeeCreate(BaseModel):
     allowance_type: str = "FIXED"
     epf_rate: float = 0.0
     etf_rate: float = 0.0
+    epf_base: str = "ADJUSTED"
     joined_date: Optional[date_cls] = None
     leaving_date: Optional[date_cls] = None
     status: str = "ACTIVE"
@@ -200,6 +201,7 @@ class EmployeeUpdate(BaseModel):
     allowance_type: Optional[str] = None
     epf_rate: Optional[float] = None
     etf_rate: Optional[float] = None
+    epf_base: Optional[str] = None
     joined_date: Optional[date_cls] = None
     leaving_date: Optional[date_cls] = None
     status: Optional[str] = None
@@ -364,7 +366,7 @@ class SalarySlipCreate(BaseModel):
     epf_employee: float = 0.0
     epf_employer: float = 0.0
     etf_employer: float = 0.0
-    total_earnings: float = 0.0
+    epf_base: str = "ADJUSTED"
     advance_deductions: float = 0.0
     advance_details: List[Dict[str, Any]] = Field(default_factory=list)
     loan_deduction: float = 0.0
@@ -399,6 +401,7 @@ class SalarySlipUpdate(BaseModel):
     epf_employee: Optional[float] = None
     epf_employer: Optional[float] = None
     etf_employer: Optional[float] = None
+    epf_base: Optional[str] = None
     advance_deductions: Optional[float] = None
     advance_details: Optional[List[Dict[str, Any]]] = None
     loan_deduction: Optional[float] = None

@@ -71,6 +71,7 @@ async def create_employee(
         "allowance_type": (payload.allowance_type or "FIXED").upper(),
         "epf_rate": round(payload.epf_rate, 2),
         "etf_rate": round(payload.etf_rate, 2),
+        "epf_base": (payload.epf_base or "ADJUSTED").upper(),
         "joined_date": payload.joined_date.isoformat() if payload.joined_date else None,
         "leaving_date": payload.leaving_date.isoformat() if payload.leaving_date else None,
         "status": payload.status,
@@ -120,6 +121,8 @@ async def update_employee(
         elif key in ("basic_salary", "daily_rate", "epf_rate", "etf_rate", "allowance") and val is not None:
             updates[key] = round(float(val), 2)
         elif key == "allowance_type":
+            updates[key] = val.upper()
+        elif key == "epf_base":
             updates[key] = val.upper()
         elif key == "salary_type":
             updates[key] = val
