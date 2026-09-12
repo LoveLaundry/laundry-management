@@ -265,6 +265,17 @@ class AttendanceUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class AttendanceBulkRecord(BaseModel):
+    employee_id: str
+    status: str = "PRESENT"
+    overtime_hours: float = 0.0
+
+
+class AttendanceBulkDay(BaseModel):
+    date: date_cls
+    records: List[AttendanceBulkRecord]
+
+
 # ---------------- Salary Advances ----------------
 class AdvanceCreate(BaseModel):
     employee_id: str

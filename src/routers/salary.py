@@ -18,7 +18,7 @@ from ..database.main_db import (
     salaries_collection,
 )
 from ..crypto_helper import decrypt_dict
-from ..models import SalarySlipCreate, SalarySlipUpdate
+from ..models import SalarySlipCreate, SalarySlipUpdate, AttendanceBulkDay
 from ..router_utils import serialize, log_audit
 from ..error_responses import NotFoundError, BadRequestError, ConflictError
 
@@ -771,6 +771,47 @@ async def bulk_set_attendance(
             upsert=True,
         )
         count += 1
+    return {"success": True, "count": count}
+
+
+# ── Attendance bulk set for a single day (all employees in one table) ──────
+@router.post("/attendance/bulk-day")
+async def bulk_day_attendance(
+    payload: AttendanceBulkDay,
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    now = datetime.now(timezone.utc)
+    date_str = payload.date.isoformat() if hasattr(payload.date, "isoformat") else payload.date
+    count = 0
+    for rec in payload.records:
+        if not rec.employee_id:
+            continue
+        _parse_oid(rec.employee_id, "employee")
+        status = (rec.status or "PRESENT").upper()
+        doc = {
+            "employee_id": rec.employee_id,
+            "date": date_str,
+            "status": status,
+            "overtime_hours": round(_num(rec.overtime_hours), 2),
+            "check_in_time": None,
+            "check_out_time": None,
+            "notes": None,
+            "updated_at": now,
+        }
+        await attendance_collection().update_one(
+            {"employee_id": rec.employee_id, "date": date_str},
+            {
+                "$set": doc,
+                "$setOnInsert": {
+                    "employee_id": rec.employee_id,
+                    "date": date_str,
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+        count += 1
+    await log_audit(str(current_user.get("user_id", "")), "bulk-set", "attendance", None, details={"date": date_str, "count": count})
     return {"success": True, "count": count}
 
 
