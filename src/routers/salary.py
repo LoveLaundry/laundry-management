@@ -240,12 +240,20 @@ async def _calculate_period_salary(
 
     allowance_fixed = _num(emp.get("allowance"))
     allowance_type = (emp.get("allowance_type") or "FIXED").upper()
+    if allowance_type in ("DAYS", "ADJUSTED"):
+        allowance_type = "ADJUSTED"
     if allowance_fixed > 0:
-        if allowance_type == "DAYS":
+        if allowance_type == "ADJUSTED":
             if salary_type == "MONTHLY" and basic_salary > 0:
                 ratio = round(base_salary_for_period / basic_salary, 4)
             else:
                 ratio = round(effective_working_days / max(effective_num_days, 1), 4)
+            allowance_for_period = round(allowance_fixed * ratio, 2)
+        elif allowance_type == "ATTENDANCE":
+            if salary_type == "MONTHLY" and basic_salary > 0:
+                ratio = round((adjusted_base * worked_days / max(effective_num_days, 1)) / max(basic_salary, 1), 4)
+            else:
+                ratio = round(worked_days / max(effective_num_days, 1), 4)
             allowance_for_period = round(allowance_fixed * ratio, 2)
         else:
             allowance_for_period = round(allowance_fixed, 2)
