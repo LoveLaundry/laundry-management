@@ -270,7 +270,12 @@ async def _calculate_period_salary(
     epf_employer = 0.0
     etf_employer = 0.0
     epf_base = (emp.get("epf_base") or "ADJUSTED").upper()
-    epf_basis = round(basic_salary, 2) if epf_base == "FULL" else base_salary_for_period
+    if epf_base == "FULL":
+        epf_basis = round(basic_salary, 2)
+    elif epf_base == "ATTENDANCE":
+        epf_basis = round(adjusted_base * worked_days / max(effective_num_days, 1), 2)
+    else:
+        epf_basis = round(base_salary_for_period, 2)
     etf_basis = epf_basis
     if epf_rate > 0:
         epf_employee = round(epf_basis * epf_rate / 100, 2)
