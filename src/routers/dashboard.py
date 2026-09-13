@@ -13,6 +13,10 @@ from ..database.main_db import (
     payments_collection,
     expenses_collection,
     expense_categories_collection,
+    employees_collection,
+    attendance_collection,
+    salary_advances_collection,
+    salary_slips_collection,
 )
 from ..crypto_helper import decrypt_dict
 from ..router_utils import serialize
@@ -158,6 +162,26 @@ async def dashboard(
         for k, v in sorted(by_exp_cat.items(), key=lambda x: x[1], reverse=True)[:6]
     ]
 
+    # Workforce stats
+    active_employees = await employees_collection().count_documents({"is_active": True})
+    att_today = await attendance_collection().find({"date": today}).to_list(length=None)
+    present_today = sum(1 for a in att_today if (a.get("status") or "").upper() in ("PRESENT", "HALF_DAY"))
+    on_leave_today = sum(1 for a in att_today if (a.get("status") or "").upper() in ("PAID_LEAVE", "ON_LEAVE", "UNPAID_LEAVE"))
+    draft_slips_month = await salary_slips_collection().count_documents({
+        "period_start": {"$regex": f"^{month_prefix}"},
+        "status": "DRAFT",
+    })
+    unpaid_slips_month = await salary_slips_collection().count_documents({
+        "period_start": {"$regex": f"^{month_prefix}"},
+        "status": {"$in": ["FINALIZED", "PAID"]},
+        "paid": {"$ne": True},
+    })
+    outstanding_advances = 0.0
+    async for a in salary_advances_collection().find({"status": "OUTSTANDING"}):
+        amt = _num(a.get("outstanding"))
+        if amt > 0:
+            outstanding_advances += amt
+
     return {
         "today_revenue": today_revenue,
         "month_revenue": month_revenue,
@@ -167,6 +191,12 @@ async def dashboard(
         "total_customers": total_customers,
         "total_expenses": total_expenses,
         "outstanding_payments": round(outstanding, 2),
+        "active_employees": active_employees,
+        "present_today": present_today,
+        "on_leave_today": on_leave_today,
+        "draft_slips_month": draft_slips_month,
+        "unpaid_slips_month": unpaid_slips_month,
+        "outstanding_advances": round(outstanding_advances, 2),
         "monthly_revenue": monthly_revenue,
         "monthly_profit": monthly_profit,
         "top_customers": top_customers,
