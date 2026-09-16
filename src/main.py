@@ -6,7 +6,7 @@ three-database connection manager, and encrypted sensitive fields.
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from .config import settings
 from .routers import routers
@@ -36,6 +36,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Laundry Management & Historical Records", version="1.0.0", lifespan=lifespan)
 
 from .security import apply_security, insecure_flags
+
+CACHEABLE_PATH_PREFIXES = ("/api/customers", "/api/items", "/api/salary/slips")
+
+
+@app.middleware("http")
+async def add_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.method == "GET" and request.url.path.startswith(CACHEABLE_PATH_PREFIXES):
+        response.headers["Cache-Control"] = "private, max-age=60"
+    return response
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",

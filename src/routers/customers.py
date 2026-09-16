@@ -66,14 +66,17 @@ async def create_customer(
 @router.get("/customers")
 async def list_customers(
     search: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_capability("customer:read")),
 ):
     query: dict = {}
     if search:
         query["name_search"] = get_search_token(search)
-    cursor = customers_collection().find(query).sort("created_at", -1)
+    total = await customers_collection().count_documents(query)
+    cursor = customers_collection().find(query).sort("created_at", -1).skip(offset).limit(limit)
     items = [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
-    return items
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/customers/summary")

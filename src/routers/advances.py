@@ -28,6 +28,8 @@ async def list_advances(
     status: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_capability("salary:read")),
 ):
     query: dict = {}
@@ -42,8 +44,10 @@ async def list_advances(
         if end_date:
             date_q["$lte"] = end_date
         query["date"] = date_q
-    cursor = salary_advances_collection().find(query).sort("date", -1)
-    return [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
+    total = await salary_advances_collection().count_documents(query)
+    cursor = salary_advances_collection().find(query).sort("date", -1).skip(offset).limit(limit)
+    items = [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 # ── Get single advance ────────────────────────────────────────────────────

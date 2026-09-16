@@ -114,6 +114,8 @@ async def list_expenses(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     category_id: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_capability("expense:read")),
 ):
     query: dict = {}
@@ -124,8 +126,10 @@ async def list_expenses(
     if category_id and ObjectId.is_valid(category_id):
         query["category_id"] = category_id
 
-    cursor = expenses_collection().find(query).sort("date", -1)
-    return [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
+    total = await expenses_collection().count_documents(query)
+    cursor = expenses_collection().find(query).sort("date", -1).skip(offset).limit(limit)
+    items = [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/expenses")

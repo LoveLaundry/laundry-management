@@ -125,6 +125,8 @@ async def list_records(
     category_id: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_capability("salary:read")),
 ):
     query: dict = {}
@@ -139,8 +141,10 @@ async def list_records(
         if end_date:
             date_q["$lte"] = end_date
         query["date"] = date_q
-    cursor = extra_work_records_collection().find(query).sort("date", -1)
-    return [serialize(doc, []) async for doc in cursor]
+    total = await extra_work_records_collection().count_documents(query)
+    cursor = extra_work_records_collection().find(query).sort("date", -1).skip(offset).limit(limit)
+    items = [serialize(doc, []) async for doc in cursor]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/extra-work/records")

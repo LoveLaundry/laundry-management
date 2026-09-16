@@ -38,6 +38,8 @@ async def list_payments(
     customer_id: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_capability("payment:read")),
 ):
     query: dict = {}
@@ -47,8 +49,10 @@ async def list_payments(
         query["payment_date"] = {"$gte": start_date}
     if end_date:
         query["payment_date"] = {**query.get("payment_date", {}), "$lte": end_date}
-    cursor = payments_collection().find(query).sort("payment_date", -1)
-    return [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
+    total = await payments_collection().count_documents(query)
+    cursor = payments_collection().find(query).sort("payment_date", -1).skip(offset).limit(limit)
+    items = [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/payments")

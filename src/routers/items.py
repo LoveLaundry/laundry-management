@@ -117,6 +117,8 @@ async def _recompute_item_stats(item_id: str):
 async def list_items(
     category_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_capability("item:read")),
 ):
     query: dict = {"is_active": True}
@@ -125,8 +127,9 @@ async def list_items(
     if search:
         query["name_search"] = get_search_token(search)
 
+    total = await items_collection().count_documents(query)
     category_cache: dict = {}
-    cursor = items_collection().find(query).sort("created_at", -1)
+    cursor = items_collection().find(query).sort("created_at", -1).skip(offset).limit(limit)
     result = []
     async for doc in cursor:
         item = serialize(doc, ITEM_SENSITIVE)
@@ -139,7 +142,7 @@ async def list_items(
         else:
             item["category_name"] = None
         result.append(item)
-    return result
+    return {"items": result, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/items")
