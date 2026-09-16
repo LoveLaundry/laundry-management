@@ -313,7 +313,7 @@ async def _calculate_period_salary(
         "employee_id": employee_id,
         "period_start": start_date,
         "period_end": end_date,
-        "status": {"$ne": "CANCELLED"},
+        "status": {"$nin": ["CANCELLED", "DELETED"]},
     })
 
     return {
@@ -416,7 +416,7 @@ async def create_salary_slip(
         "employee_id": payload.employee_id,
         "period_start": payload.period_start.isoformat() if hasattr(payload.period_start, "isoformat") else str(payload.period_start),
         "period_end": payload.period_end.isoformat() if hasattr(payload.period_end, "isoformat") else str(payload.period_end),
-        "status": {"$ne": "CANCELLED"},
+        "status": {"$nin": ["CANCELLED", "DELETED"]},
     })
     if existing:
         raise ConflictError(f"A salary slip already exists for this period (ID: {str(existing['_id'])})")
@@ -551,6 +551,7 @@ async def list_salary_slips(
     status: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
     month: Optional[int] = Query(None),
+    deleted: bool = Query(False),
     current_user: dict = Depends(require_capability("salary:read")),
 ):
     query: dict = {}
@@ -558,6 +559,10 @@ async def list_salary_slips(
         query["employee_id"] = employee_id
     if status:
         query["status"] = status
+    elif deleted:
+        query["status"] = "DELETED"
+    else:
+        query["status"] = {"$ne": "DELETED"}
     if year:
         query["period_start"] = {"$regex": f"^{year:04d}-"}
     if month and year:
@@ -593,6 +598,8 @@ async def update_salary_slip(
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "CANCELLED":
         raise BadRequestError("Cannot edit a cancelled salary slip")
+    if existing.get("status") == "DELETED":
+        raise BadRequestError("Cannot edit a deleted salary slip")
 
     updates = payload.model_dump(exclude_none=True)
     for k in ["basic_salary", "adjusted_base_salary", "base_salary_for_period", "worked_days", "absent_days", "leave_days",
@@ -657,6 +664,8 @@ async def finalize_salary_slip(
         raise BadRequestError("Salary slip is already finalized")
     if existing.get("status") == "CANCELLED":
         raise BadRequestError("Cannot finalize a cancelled salary slip")
+    if existing.get("status") == "DELETED":
+        raise BadRequestError("Cannot finalize a deleted salary slip")
 
     await salary_slips_collection().update_one(
         {"_id": oid},
@@ -681,6 +690,8 @@ async def cancel_salary_slip(
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "CANCELLED":
         raise BadRequestError("Salary slip is already cancelled")
+    if existing.get("status") == "DELETED":
+        raise BadRequestError("Cannot cancel a deleted salary slip")
 
     for adv_detail in (existing.get("advance_details") or []):
         adv_id = adv_detail.get("advance_id")
@@ -706,6 +717,36 @@ async def cancel_salary_slip(
     return {"success": True, "status": "CANCELLED"}
 
 
+# ── Delete salary slip (soft delete — only cancelled slips) ────────────────
+@router.delete("/salary/slips/{slip_id}")
+async def delete_salary_slip(
+    slip_id: str,
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    oid = _parse_oid(slip_id, "slip")
+    existing = await salary_slips_collection().find_one({"_id": oid})
+    if not existing:
+        raise NotFoundError("Salary slip", slip_id)
+    if existing.get("status") == "DELETED":
+        raise BadRequestError("Salary slip is already deleted")
+    if existing.get("status") != "CANCELLED":
+        raise BadRequestError("Only a cancelled salary slip can be deleted")
+
+    await salary_slips_collection().update_one(
+        {"_id": oid},
+        {"$set": {
+            "status": "DELETED",
+            "deleted_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    await log_audit(
+        str(current_user.get("user_id", "")),
+        "delete", "salary_slip", slip_id, details={},
+    )
+    return {"success": True, "status": "DELETED"}
+
+
 # ── Mark salary slip as paid ──────────────────────────────────────────────
 @router.post("/salary/slips/{slip_id}/pay")
 async def mark_salary_paid(
@@ -719,6 +760,8 @@ async def mark_salary_paid(
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "CANCELLED":
         raise BadRequestError("Cannot pay a cancelled salary slip")
+    if existing.get("status") == "DELETED":
+        raise BadRequestError("Cannot pay a deleted salary slip")
     if amount <= 0:
         raise BadRequestError("Payment amount must be greater than zero")
 
@@ -746,7 +789,7 @@ async def employee_salary_history(
 ):
     _parse_oid(employee_id, "employee")
     cursor = salary_slips_collection().find(
-        {"employee_id": employee_id}
+        {"employee_id": employee_id, "status": {"$ne": "DELETED"}}
     ).sort("period_start", -1)
     return [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]
 
@@ -1009,7 +1052,7 @@ async def run_payroll(
             "employee_id": employee_id,
             "period_start": start_date,
             "period_end": end_date,
-            "status": {"$ne": "CANCELLED"},
+            "status": {"$nin": ["CANCELLED", "DELETED"]},
         })
         if existing:
             skipped.append({"employee_id": employee_id, "slip_id": str(existing["_id"])})
