@@ -5,10 +5,8 @@ three-database connection manager, and encrypted sensitive fields.
 """
 import logging
 from contextlib import asynccontextmanager
-from typing import List
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .routers import routers
@@ -37,6 +35,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Laundry Management & Historical Records", version="1.0.0", lifespan=lifespan)
 
+from .security import apply_security, insecure_flags
+
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
@@ -45,13 +45,7 @@ ALLOWED_ORIGINS = [
 ]
 
 origins = ALLOWED_ORIGINS if settings.cors_origins == ["*"] or not settings.cors_origins else settings.cors_origins
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=False if "*" in origins else True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+apply_security(app, rate_limit=300)
 
 
 @app.get("/")
@@ -64,7 +58,16 @@ async def health():
     from .database.connection_manager import ping
 
     main_ok = await ping("main")
-    return {"status": "ok" if main_ok else "degraded", "database": "main" if main_ok else "unreachable"}
+    flags = insecure_flags()
+    return {
+        "status": "ok" if main_ok else "degraded",
+        "database": "main" if main_ok else "unreachable",
+        "security": {
+            "headers": True,
+            "rate_limiting": True,
+            "insecure_defaults": flags,
+        },
+    }
 
 
 for r in routers:
