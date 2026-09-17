@@ -20,6 +20,7 @@ SALARIES = "salaries"
 ATTENDANCE = "attendance"
 SALARY_ADVANCES = "salary_advances"
 SALARY_SLIPS = "salary_slips"
+SALARY_PACKAGES = "salary_packages"
 HOLIDAYS = "holidays"
 EXTRA_WORK_CATEGORIES = "extra_work_categories"
 EXTRA_WORK_RECORDS = "extra_work_records"
@@ -80,6 +81,10 @@ def salary_advances_collection() -> AsyncIOMotorCollection:
 
 def salary_slips_collection() -> AsyncIOMotorCollection:
     return _db()[SALARY_SLIPS]
+
+
+def salary_packages_collection() -> AsyncIOMotorCollection:
+    return _db()[SALARY_PACKAGES]
 
 
 def holidays_collection() -> AsyncIOMotorCollection:
@@ -160,6 +165,8 @@ async def ensure_indexes() -> None:
     await salary_slips_collection().create_index("slip_number", background=True)
     await salary_slips_collection().create_index("status", background=True)
     await salary_slips_collection().create_index("period_start", background=True)
+
+    await salary_packages_collection().create_index([("employee_id", 1), ("month", 1)], unique=True, background=True)
 
     await holidays_collection().create_index("date", background=True)
     await holidays_collection().create_index([("date", 1)], unique=True, background=True)

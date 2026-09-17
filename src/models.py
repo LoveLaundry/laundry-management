@@ -177,11 +177,16 @@ class EmployeeCreate(BaseModel):
     salary_type: str = "MONTHLY"
     basic_salary: float = 0.0
     daily_rate: float = 0.0
+    weekly_rate: float = 0.0
+    contract_amount: float = 0.0
+    overtime_rate: float = 0.0
     allowance: float = 0.0
     allowance_type: str = "FIXED"
     epf_rate: float = 0.0
     etf_rate: float = 0.0
     epf_base: str = "ADJUSTED"
+    attendance_required: bool = True
+    salary_components: List[Dict[str, Any]] = Field(default_factory=list)
     joined_date: Optional[date_cls] = None
     leaving_date: Optional[date_cls] = None
     status: str = "ACTIVE"
@@ -197,15 +202,65 @@ class EmployeeUpdate(BaseModel):
     salary_type: Optional[str] = None
     basic_salary: Optional[float] = None
     daily_rate: Optional[float] = None
+    weekly_rate: Optional[float] = None
+    contract_amount: Optional[float] = None
+    overtime_rate: Optional[float] = None
     allowance: Optional[float] = None
     allowance_type: Optional[str] = None
     epf_rate: Optional[float] = None
     etf_rate: Optional[float] = None
     epf_base: Optional[str] = None
+    attendance_required: Optional[bool] = None
+    salary_components: Optional[List[Dict[str, Any]]] = None
     joined_date: Optional[date_cls] = None
     leaving_date: Optional[date_cls] = None
     status: Optional[str] = None
     is_active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class SalaryPackageComponent(BaseModel):
+    type: str = "OTHER_PAYMENT"
+    name: str = ""
+    amount: float = 0.0
+
+
+class SalaryPackageBase(BaseModel):
+    salary_type: str = "MONTHLY"
+    attendance_required: bool = True
+    basic_salary: float = 0.0
+    daily_rate: float = 0.0
+    weekly_rate: float = 0.0
+    contract_amount: float = 0.0
+    overtime_rate: float = 0.0
+    allowance: float = 0.0
+    allowance_type: str = "FIXED"
+    epf_rate: float = 0.0
+    etf_rate: float = 0.0
+    epf_base: str = "ADJUSTED"
+    salary_components: List[SalaryPackageComponent] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class SalaryPackageUpsert(SalaryPackageBase):
+    employee_id: str
+    month: str
+
+
+class SalaryPackageUpdate(BaseModel):
+    salary_type: Optional[str] = None
+    attendance_required: Optional[bool] = None
+    basic_salary: Optional[float] = None
+    daily_rate: Optional[float] = None
+    weekly_rate: Optional[float] = None
+    contract_amount: Optional[float] = None
+    overtime_rate: Optional[float] = None
+    allowance: Optional[float] = None
+    allowance_type: Optional[str] = None
+    epf_rate: Optional[float] = None
+    etf_rate: Optional[float] = None
+    epf_base: Optional[str] = None
+    salary_components: Optional[List[SalaryPackageComponent]] = None
     notes: Optional[str] = None
 
 
@@ -374,6 +429,8 @@ class SalarySlipCreate(BaseModel):
     allowance_details: List[Dict[str, Any]] = Field(default_factory=list)
     extra_work_total: float = 0.0
     extra_work_details: List[Dict[str, Any]] = Field(default_factory=list)
+    bonus: float = 0.0
+    other_payments: float = 0.0
     epf_employee: float = 0.0
     epf_employer: float = 0.0
     etf_employer: float = 0.0
@@ -382,6 +439,9 @@ class SalarySlipCreate(BaseModel):
     advance_details: List[Dict[str, Any]] = Field(default_factory=list)
     loan_deduction: float = 0.0
     other_deductions: float = 0.0
+    components: List[Dict[str, Any]] = Field(default_factory=list)
+    attendance_required: bool = True
+    calculation_method: str = "MONTHLY_ATTENDANCE"
     total_deductions: float = 0.0
     gross_salary: float = 0.0
     net_salary: float = 0.0
@@ -409,6 +469,8 @@ class SalarySlipUpdate(BaseModel):
     allowance_details: Optional[List[Dict[str, Any]]] = None
     extra_work_total: Optional[float] = None
     extra_work_details: Optional[List[Dict[str, Any]]] = None
+    bonus: Optional[float] = None
+    other_payments: Optional[float] = None
     epf_employee: Optional[float] = None
     epf_employer: Optional[float] = None
     etf_employer: Optional[float] = None
@@ -417,6 +479,9 @@ class SalarySlipUpdate(BaseModel):
     advance_details: Optional[List[Dict[str, Any]]] = None
     loan_deduction: Optional[float] = None
     other_deductions: Optional[float] = None
+    components: Optional[List[Dict[str, Any]]] = None
+    attendance_required: Optional[bool] = None
+    calculation_method: Optional[str] = None
     total_deductions: Optional[float] = None
     gross_salary: Optional[float] = None
     net_salary: Optional[float] = None

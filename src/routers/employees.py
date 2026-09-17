@@ -67,11 +67,16 @@ async def create_employee(
         "salary_type": payload.salary_type,
         "basic_salary": round(payload.basic_salary, 2),
         "daily_rate": round(payload.daily_rate, 2),
+        "weekly_rate": round(payload.weekly_rate, 2),
+        "contract_amount": round(payload.contract_amount, 2),
+        "overtime_rate": round(payload.overtime_rate, 2),
         "allowance": round(payload.allowance, 2),
         "allowance_type": (payload.allowance_type or "FIXED").upper(),
         "epf_rate": round(payload.epf_rate, 2),
         "etf_rate": round(payload.etf_rate, 2),
         "epf_base": (payload.epf_base or "ADJUSTED").upper(),
+        "attendance_required": payload.attendance_required,
+        "salary_components": [c.model_dump() for c in payload.salary_components],
         "joined_date": payload.joined_date.isoformat() if payload.joined_date else None,
         "leaving_date": payload.leaving_date.isoformat() if payload.leaving_date else None,
         "status": payload.status,
@@ -120,7 +125,7 @@ async def update_employee(
             continue
         if key in ("joined_date", "leaving_date") and val is not None:
             updates[key] = val.isoformat() if hasattr(val, "isoformat") else val
-        elif key in ("basic_salary", "daily_rate", "epf_rate", "etf_rate", "allowance") and val is not None:
+        elif key in ("basic_salary", "daily_rate", "weekly_rate", "contract_amount", "overtime_rate", "epf_rate", "etf_rate", "allowance") and val is not None:
             updates[key] = round(float(val), 2)
         elif key == "allowance_type":
             updates[key] = val.upper()
@@ -128,6 +133,10 @@ async def update_employee(
             updates[key] = val.upper()
         elif key == "salary_type":
             updates[key] = val
+        elif key == "attendance_required":
+            updates[key] = bool(val)
+        elif key == "salary_components":
+            updates[key] = [c.model_dump() for c in val] if isinstance(val, list) else val
         elif key in SENSITIVE_FIELDS:
             updates[key] = val
         else:
@@ -336,6 +345,11 @@ async def create_attendance(
     oid = ObjectId(employee_id) if ObjectId.is_valid(employee_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Employee not found")
+    emp = await employees_collection().find_one({"_id": oid}, {"attendance_required": 1})
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if emp.get("attendance_required") is False:
+        raise BadRequestError("Attendance is not required for this employee (fixed salary arrangement)")
     doc = {
         "employee_id": employee_id,
         "date": payload.date.isoformat(),

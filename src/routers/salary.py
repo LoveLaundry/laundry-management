@@ -10,6 +10,7 @@ from ..database.main_db import (
     employees_collection,
     salary_slips_collection,
     salary_advances_collection,
+    salary_packages_collection,
     attendance_collection,
     holidays_collection,
     extra_work_records_collection,
@@ -18,7 +19,10 @@ from ..database.main_db import (
     salaries_collection,
 )
 from ..crypto_helper import decrypt_dict
-from ..models import SalarySlipCreate, SalarySlipUpdate, AttendanceBulkDay
+from ..models import (
+    SalarySlipCreate, SalarySlipUpdate, AttendanceBulkDay,
+    SalaryPackageUpsert, SalaryPackageUpdate,
+)
 from ..router_utils import serialize, log_audit
 from ..error_responses import NotFoundError, BadRequestError, ConflictError
 
@@ -128,16 +132,41 @@ async def _calculate_period_salary(
 ) -> dict:
     """Calculate salary for an arbitrary date period (monthly / weekly / custom)."""
     employee_id = str(emp["_id"])
-    salary_type = emp.get("salary_type", "MONTHLY")
-    basic_salary = _num(emp.get("basic_salary"))
-    daily_rate = _num(emp.get("daily_rate"))
-    epf_rate = _num(emp.get("epf_rate"))
-    etf_rate = _num(emp.get("etf_rate"))
-
     settings = await _get_company_settings()
+
+    salary_pkg = await salary_packages_collection().find_one({
+        "employee_id": employee_id,
+        "month": start_date[:7],
+    })
+
+    def _arr(field, default):
+        if salary_pkg is not None and field in salary_pkg and salary_pkg.get(field) is not None:
+            return salary_pkg.get(field)
+        return default
+
+    salary_type = (_arr("salary_type", emp.get("salary_type", "MONTHLY")) or "MONTHLY").upper()
+    attendance_required = bool(_arr("attendance_required", emp.get("attendance_required", True)))
+    basic_salary = _num(_arr("basic_salary", emp.get("basic_salary")))
+    daily_rate = _num(_arr("daily_rate", emp.get("daily_rate")))
+    weekly_rate = _num(_arr("weekly_rate", emp.get("weekly_rate")))
+    contract_amount = _num(_arr("contract_amount", emp.get("contract_amount")))
+    employee_overtime_rate = _num(_arr("overtime_rate", emp.get("overtime_rate")))
+    epf_rate = _num(_arr("epf_rate", emp.get("epf_rate")))
+    etf_rate = _num(_arr("etf_rate", emp.get("etf_rate")))
+    salary_components = _arr("salary_components", emp.get("salary_components")) or []
+
     working_days_pattern = settings.get("working_days_pattern", [0, 1, 2, 3, 4, 5])
     salary_basis_days = settings.get("salary_basis_days", 30)
     basis_days = max(_num(emp.get("salary_basis_days")), salary_basis_days, 1)
+
+    if salary_type == "CONTRACT":
+        calculation_method = "CONTRACT"
+    elif salary_type == "DAILY":
+        calculation_method = "DAILY_WORKED_DAYS"
+    elif salary_type == "WEEKLY":
+        calculation_method = "WEEKLY_FIXED" if not attendance_required else "WEEKLY_ATTENDANCE"
+    else:
+        calculation_method = "FIXED_MONTHLY" if not attendance_required else "MONTHLY_ATTENDANCE"
 
     sdt = date_cls.fromisoformat(start_date)
     edt = date_cls.fromisoformat(end_date)
@@ -207,44 +236,70 @@ async def _calculate_period_salary(
                 worked_days += 1
             elif status in ("HALF_DAY",):
                 worked_days += 0.5
-                absent_days += 0.5
+                if attendance_required:
+                    absent_days += 0.5
             elif status in ("ON_LEAVE", "PAID_LEAVE"):
                 leave_days += 1
             elif status in ("UNPAID_LEAVE", "ABSENT"):
-                absent_days += 1
+                if attendance_required:
+                    absent_days += 1
             else:
-                absent_days += 1
+                if attendance_required:
+                    absent_days += 1
             total_ot_hours += _num(att.get("overtime_hours"))
         else:
-            absent_days += 1
+            if attendance_required:
+                absent_days += 1
         day = date_cls.fromordinal(day.toordinal() + 1)
 
     effective_working_days = worked_days + leave_days
 
     effective_num_days = (effective_end - effective_start).days + 1
+    partial_employment = (effective_start != sdt) or (effective_end != edt)
 
-    adjusted_base = round(basic_salary * effective_num_days / basis_days, 2) if salary_type == "MONTHLY" else 0
-    base_salary_for_period = round(adjusted_base * effective_working_days / effective_num_days, 2) if salary_type == "MONTHLY" else 0
+    adjusted_base = 0.0
+    base_salary_for_period = 0.0
 
-    if salary_type == "DAILY":
+    if salary_type == "MONTHLY":
+        if attendance_required:
+            adjusted_base = round(basic_salary * effective_num_days / basis_days, 2) if basic_salary > 0 else 0
+            base_salary_for_period = round(adjusted_base * effective_working_days / effective_num_days, 2) if adjusted_base > 0 else 0
+        else:
+            # FIXED_MONTHLY: pay the full configured amount regardless of 28/30/31 day months.
+            # Only prorate for partial employment (joined/left mid-period).
+            adjusted_base = round(basic_salary, 2)
+            base_salary_for_period = round(adjusted_base * effective_num_days / basis_days, 2) if partial_employment else adjusted_base
+    elif salary_type == "DAILY":
         base_salary_for_period = round(daily_rate * worked_days, 2)
-        adjusted_base = basic_salary or daily_rate * settings.get("working_days_per_week", 6)
+        adjusted_base = basic_salary or round(daily_rate * settings.get("working_days_per_week", 6), 2)
     elif salary_type == "WEEKLY":
-        base_salary_for_period = round(daily_rate * worked_days, 2)
-        adjusted_base = base_salary_for_period if worked_days > 0 else round(daily_rate * settings.get("working_days_per_week", 6), 2)
+        weekly_amt = weekly_rate or round(daily_rate * settings.get("working_days_per_week", 6), 2)
+        if attendance_required:
+            working_days_per_week = max(settings.get("working_days_per_week", 6), 1)
+            base_salary_for_period = round(weekly_amt * worked_days / working_days_per_week, 2)
+            adjusted_base = round(weekly_amt * effective_num_days / 7, 2) if weekly_amt > 0 else 0
+        else:
+            adjusted_base = round(weekly_amt * effective_num_days / 7, 2) if weekly_amt > 0 else 0
+            base_salary_for_period = adjusted_base
+    elif salary_type == "CONTRACT":
+        adjusted_base = round(contract_amount or basic_salary, 2)
+        base_salary_for_period = round(adjusted_base * effective_num_days / basis_days, 2) if partial_employment else adjusted_base
 
     overtime_pay = 0.0
-    overtime_rate = _num(emp.get("overtime_rate")) or settings.get("default_overtime_rate", 0)
+    overtime_rate = employee_overtime_rate or settings.get("default_overtime_rate", 0)
     if overtime_rate > 0 and total_ot_hours > 0:
         overtime_pay = round(total_ot_hours * overtime_rate, 2)
 
-    allowance_fixed = _num(emp.get("allowance"))
-    allowance_type = (emp.get("allowance_type") or "FIXED").upper()
+    allowance_fixed = _num(_arr("allowance", emp.get("allowance")))
+    allowance_type = (_arr("allowance_type", emp.get("allowance_type")) or "FIXED").upper()
     if allowance_type in ("DAYS", "ADJUSTED"):
         allowance_type = "ADJUSTED"
+    allowance_for_period = 0.0
     if allowance_fixed > 0:
-        if allowance_type == "ADJUSTED":
-            if salary_type == "MONTHLY" and basic_salary > 0:
+        if not attendance_required:
+            allowance_for_period = round(allowance_fixed, 2)
+        elif allowance_type == "ADJUSTED":
+            if salary_type == "MONTHLY" and basic_salary > 0 and base_salary_for_period > 0:
                 ratio = round(base_salary_for_period / basic_salary, 4)
             else:
                 ratio = round(effective_working_days / max(effective_num_days, 1), 4)
@@ -257,8 +312,6 @@ async def _calculate_period_salary(
             allowance_for_period = round(allowance_fixed * ratio, 2)
         else:
             allowance_for_period = round(allowance_fixed, 2)
-    else:
-        allowance_for_period = 0.0
 
     extra_work_records = await _get_extra_work(employee_id, start_date, end_date)
     extra_work_total = 0.0
@@ -274,14 +327,33 @@ async def _calculate_period_salary(
             "amount": ew.get("amount"),
         })
 
+    bonus_total = 0.0
+    other_payments_total = 0.0
+    other_deductions_total = 0.0
+    components_snapshot = []
+    if salary_components:
+        for comp in salary_components:
+            ctype = (comp.get("type") or "OTHER_PAYMENT").upper()
+            cname = (comp.get("name") or "").strip()
+            camount = _num(comp.get("amount"))
+            if camount <= 0:
+                continue
+            components_snapshot.append({"type": ctype, "name": cname, "amount": round(camount, 2)})
+            if ctype == "BONUS":
+                bonus_total += camount
+            elif ctype in ("DEDUCTION", "OTHER_DEDUCTION"):
+                other_deductions_total += camount
+            else:
+                other_payments_total += camount
+
     epf_employee = 0.0
     epf_employer = 0.0
     etf_employer = 0.0
-    epf_base = (emp.get("epf_base") or "ADJUSTED").upper()
+    epf_base = (_arr("epf_base", emp.get("epf_base")) or "ADJUSTED").upper()
     if epf_base == "FULL":
         epf_basis = round(basic_salary, 2)
     elif epf_base == "ATTENDANCE":
-        epf_basis = round(adjusted_base * worked_days / max(effective_num_days, 1), 2)
+        epf_basis = round(adjusted_base * worked_days / max(effective_num_days, 1), 2) if attendance_required else round(base_salary_for_period, 2)
     else:
         epf_basis = round(base_salary_for_period, 2)
     etf_basis = epf_basis
@@ -305,8 +377,8 @@ async def _calculate_period_salary(
             "reason": adv.get("reason"),
         })
 
-    gross_salary = round(base_salary_for_period + overtime_pay + extra_work_total + allowance_for_period, 2)
-    total_deductions = round(epf_employee + total_advance_deductions, 2)
+    gross_salary = round(base_salary_for_period + overtime_pay + extra_work_total + allowance_for_period + bonus_total + other_payments_total, 2)
+    total_deductions = round(epf_employee + total_advance_deductions + other_deductions_total, 2)
     net_salary = round(gross_salary - total_deductions, 2)
 
     existing_slip = await salary_slips_collection().find_one({
@@ -320,6 +392,9 @@ async def _calculate_period_salary(
         "employee_id": employee_id,
         "employee_name": emp_decrypted.get("name"),
         "salary_type": salary_type,
+        "pay_frequency": salary_type,
+        "attendance_required": attendance_required,
+        "calculation_method": calculation_method,
         "period_type": period_type,
         "period_start": start_date,
         "period_end": end_date,
@@ -337,11 +412,16 @@ async def _calculate_period_salary(
         "overtime_pay": overtime_pay,
         "basic_salary": basic_salary,
         "daily_rate": daily_rate,
+        "weekly_rate": weekly_rate,
+        "contract_amount": contract_amount,
         "adjusted_base_salary": adjusted_base,
         "base_salary_for_period": base_salary_for_period,
         "allowance": allowance_fixed,
         "allowance_type": allowance_type,
         "allowance_for_period": allowance_for_period,
+        "bonus": round(bonus_total, 2),
+        "other_payments": round(other_payments_total, 2),
+        "components": components_snapshot,
         "extra_work_total": extra_work_total,
         "extra_work_details": extra_work_details,
         "epf_rate": epf_rate,
@@ -354,6 +434,7 @@ async def _calculate_period_salary(
         "gross_salary": gross_salary,
         "advance_deductions": total_advance_deductions,
         "advance_details": advance_details,
+        "other_deductions": round(other_deductions_total, 2),
         "total_deductions": total_deductions,
         "net_salary": net_salary,
         "existing_slip_id": str(existing_slip["_id"]) if existing_slip else None,
@@ -446,7 +527,9 @@ async def create_salary_slip(
         base_for_period
         + _num(payload.overtime_pay)
         + _num(payload.extra_work_total)
-        + _num(payload.allowances),
+        + _num(payload.allowances)
+        + _num(payload.bonus)
+        + _num(payload.other_payments),
         2,
     )
 
@@ -482,6 +565,11 @@ async def create_salary_slip(
         "overtime_pay": round(_num(payload.overtime_pay), 2),
         "allowances": round(_num(payload.allowances), 2),
         "allowance_details": payload.allowance_details or [],
+        "bonus": round(_num(payload.bonus), 2),
+        "other_payments": round(_num(payload.other_payments), 2),
+        "components": payload.components or [],
+        "attendance_required": bool(payload.attendance_required),
+        "calculation_method": payload.calculation_method or "MONTHLY_ATTENDANCE",
         "extra_work_total": round(_num(payload.extra_work_total), 2),
         "extra_work_details": payload.extra_work_details or [],
         "epf_employee": round(_num(payload.epf_employee), 2),
@@ -608,6 +696,7 @@ async def update_salary_slip(
     updates = payload.model_dump(exclude_none=True)
     for k in ["basic_salary", "adjusted_base_salary", "base_salary_for_period", "worked_days", "absent_days", "leave_days",
               "overtime_hours", "overtime_rate", "overtime_pay", "allowances", "extra_work_total",
+              "bonus", "other_payments",
               "epf_employee", "epf_employer", "etf_employer", "advance_deductions", "loan_deduction",
               "other_deductions", "amount_paid"]:
         if k in updates:
@@ -627,7 +716,9 @@ async def update_salary_slip(
         base_for_period
         + _num(base.get("overtime_pay"))
         + _num(base.get("extra_work_total"))
-        + _num(base.get("allowances")),
+        + _num(base.get("allowances"))
+        + _num(base.get("bonus"))
+        + _num(base.get("other_payments")),
         2,
     )
     total_deductions = round(
@@ -808,6 +899,9 @@ async def bulk_set_attendance(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     _parse_oid(employee_id, "employee")
+    emp = await employees_collection().find_one({"_id": ObjectId(employee_id)}, {"attendance_required": 1})
+    if emp and emp.get("attendance_required") is False:
+        raise BadRequestError("Attendance is not required for this employee (fixed salary arrangement)")
     count = 0
     for d in dates:
         doc = {
@@ -842,6 +936,9 @@ async def bulk_day_attendance(
         if not rec.employee_id:
             continue
         _parse_oid(rec.employee_id, "employee")
+        emp = await employees_collection().find_one({"_id": ObjectId(rec.employee_id)}, {"attendance_required": 1})
+        if emp and emp.get("attendance_required") is False:
+            raise BadRequestError("Attendance is not required for one or more selected employees (fixed salary arrangement)")
         status = (rec.status or "PRESENT").upper()
         doc = {
             "employee_id": rec.employee_id,
@@ -1085,6 +1182,12 @@ async def run_payroll(
                 extra_work_total=_num(calc.get("extra_work_total")),
                 extra_work_details=calc.get("extra_work_details") or [],
                 allowances=_num(calc.get("allowance_for_period")),
+                bonus=_num(calc.get("bonus")),
+                other_payments=_num(calc.get("other_payments")),
+                other_deductions=_num(calc.get("other_deductions")),
+                components=calc.get("components") or [],
+                attendance_required=bool(calc.get("attendance_required", True)),
+                calculation_method=calc.get("calculation_method") or "MONTHLY_ATTENDANCE",
                 epf_employee=_num(calc.get("epf_employee")),
                 epf_employer=_num(calc.get("epf_employer")),
                 etf_employer=_num(calc.get("etf_employer")),
@@ -1104,6 +1207,144 @@ async def run_payroll(
         details={"year": year, "month": month, "created": len(created), "skipped": len(skipped), "failed": len(failed)},
     )
     return {"created": created, "count": len(created), "skipped": skipped, "failed": failed}
+
+
+# ── Salary package overrides (per-month arrangement) ─────────────────────
+def _validate_month(value: str) -> str:
+    parts = str(value or "").split("-")
+    if len(parts) != 2 or len(parts[0]) != 4 or len(parts[1]) != 2:
+        raise BadRequestError("Month must be in YYYY-MM format")
+    y, m = parts
+    if not (y.isdigit() and m.isdigit() and (1 <= int(m) <= 12)):
+        raise BadRequestError("Month must be a valid YYYY-MM value")
+    return f"{int(y):04d}-{int(m):02d}"
+
+
+async def _package_locked(employee_id: str, month: str) -> bool:
+    """A finalized/paid slip makes the month's arrangement immutable."""
+    year, mon = int(month[:4]), int(month[5:7])
+    num_days = calendar.monthrange(year, mon)[1]
+    existing = await salary_slips_collection().find_one({
+        "employee_id": employee_id,
+        "period_start": f"{month}-01",
+        "period_end": f"{month}-{num_days:02d}",
+        "status": {"$in": ["FINALIZED", "PAID"]},
+    })
+    return existing is not None
+
+
+@router.get("/salary/packages")
+async def list_salary_packages(
+    employee_id: Optional[str] = Query(None),
+    month: Optional[str] = Query(None),
+    current_user: dict = Depends(require_capability("salary:read")),
+):
+    query: dict = {}
+    if employee_id:
+        _parse_oid(employee_id, "employee")
+        query["employee_id"] = employee_id
+    if month:
+        query["month"] = _validate_month(month)
+    cursor = salary_packages_collection().find(query).sort("month", -1)
+    return [serialize(doc, ["notes"]) async for doc in cursor]
+
+
+@router.post("/salary/packages")
+async def upsert_salary_package(
+    payload: SalaryPackageUpsert,
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    _parse_oid(payload.employee_id, "employee")
+    month = _validate_month(payload.month)
+    if await _package_locked(payload.employee_id, month):
+        raise ConflictError("Salary for this month is already finalized for this employee")
+
+    doc = {
+        "employee_id": payload.employee_id,
+        "month": month,
+        "salary_type": (payload.salary_type or "MONTHLY").upper(),
+        "attendance_required": payload.attendance_required,
+        "basic_salary": round(_num(payload.basic_salary), 2),
+        "daily_rate": round(_num(payload.daily_rate), 2),
+        "weekly_rate": round(_num(payload.weekly_rate), 2),
+        "contract_amount": round(_num(payload.contract_amount), 2),
+        "overtime_rate": round(_num(payload.overtime_rate), 2),
+        "allowance": round(_num(payload.allowance), 2),
+        "allowance_type": (payload.allowance_type or "FIXED").upper(),
+        "epf_rate": round(_num(payload.epf_rate), 2),
+        "etf_rate": round(_num(payload.etf_rate), 2),
+        "epf_base": (payload.epf_base or "ADJUSTED").upper(),
+        "salary_components": [c.model_dump() for c in payload.salary_components] if payload.salary_components else [],
+        "notes": (payload.notes or "").strip() or None,
+        "created_by": str(current_user.get("user_id", "")),
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+    filterq = {"employee_id": payload.employee_id, "month": month}
+    existing = await salary_packages_collection().find_one(filterq)
+    if existing:
+        doc["created_at"] = existing.get("created_at", doc["created_at"])
+        await salary_packages_collection().update_one(filterq, {"$set": doc})
+        result_id = existing["_id"]
+    else:
+        result = await salary_packages_collection().insert_one(doc)
+        result_id = result.inserted_id
+
+    await log_audit(
+        str(current_user.get("user_id", "")),
+        "upsert", "salary_package", str(result_id),
+        details={"employee_id": payload.employee_id, "month": month},
+    )
+    saved = await salary_packages_collection().find_one({"_id": result_id})
+    return serialize(saved, ["notes"])
+
+
+@router.put("/salary/packages/{package_id}")
+async def update_salary_package(
+    package_id: str,
+    payload: SalaryPackageUpdate,
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    oid = _parse_oid(package_id, "package")
+    existing = await salary_packages_collection().find_one({"_id": oid})
+    if not existing:
+        raise NotFoundError("Salary package", package_id)
+    if await _package_locked(str(existing.get("employee_id", "")), str(existing.get("month", ""))):
+        raise ConflictError("Salary for this month is already finalized for this employee")
+
+    updates = payload.model_dump(exclude_none=True)
+    numeric = ["basic_salary", "daily_rate", "weekly_rate", "contract_amount", "overtime_rate", "allowance", "epf_rate", "etf_rate"]
+    for k in numeric:
+        if k in updates:
+            updates[k] = round(float(updates[k]), 2)
+    for k in ("salary_type", "allowance_type", "epf_base"):
+        if updates.get(k):
+            updates[k] = updates[k].upper()
+    if updates.get("salary_components") is not None:
+        updates["salary_components"] = [c.model_dump() for c in updates["salary_components"]]
+    updates["updated_at"] = datetime.now(timezone.utc)
+
+    await salary_packages_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(str(current_user.get("user_id", "")), "update", "salary_package", package_id, details={})
+    updated = await salary_packages_collection().find_one({"_id": oid})
+    return serialize(updated, ["notes"])
+
+
+@router.delete("/salary/packages/{package_id}")
+async def delete_salary_package(
+    package_id: str,
+    current_user: dict = Depends(require_capability("salary:write")),
+):
+    oid = _parse_oid(package_id, "package")
+    existing = await salary_packages_collection().find_one({"_id": oid})
+    if not existing:
+        raise NotFoundError("Salary package", package_id)
+    if await _package_locked(str(existing.get("employee_id", "")), str(existing.get("month", ""))):
+        raise ConflictError("Salary for this month is already finalized for this employee")
+    await salary_packages_collection().delete_one({"_id": oid})
+    await log_audit(str(current_user.get("user_id", "")), "delete", "salary_package", package_id, details={})
+    return {"success": True}
 
 
 # ── Legacy salary compatibility ───────────────────────────────────────────
