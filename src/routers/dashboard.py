@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from datetime import timedelta
 
@@ -92,6 +93,56 @@ async def _paid_by_customer() -> dict:
     return {str(r.get("_id") or ""): r.get("amount") or 0 for r in rows}
 
 
+async def _customer_revenue_top6() -> list:
+    """Top 6 customers by aggregate revenue (server-side)."""
+    return await transactions_collection().aggregate([
+        {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "revenue": {"$sum": "$total_amount"}}},
+        {"$sort": {"revenue": -1}},
+        {"$limit": 6},
+    ]).to_list(length=None)
+
+
+async def _expense_breakdown_rows() -> list:
+    """Top 6 expense categories by aggregate amount (server-side)."""
+    return await expenses_collection().aggregate([
+        {"$group": {"_id": {"$ifNull": ["$category_id", "Uncategorized"]}, "amount": {"$sum": "$amount"}}},
+        {"$sort": {"amount": -1}},
+        {"$limit": 6},
+    ]).to_list(length=None)
+
+
+async def _top_items() -> dict:
+    """Top items by revenue. `items` is encrypted per-document, so it must be
+    projected and decrypted in Python — only the needed column is transferred."""
+    by_item: dict = {}
+    cursor = transactions_collection().find({}, {"items": 1})
+    async for doc in cursor:
+        if "items" not in doc:
+            continue
+        try:
+            dec = decrypt_dict(doc, ["items"])
+        except (ValueError, KeyError):
+            continue
+        for it in dec.get("items") or []:
+            iid = str(it.get("item_id") or "")
+            if not iid:
+                continue
+            rec = by_item.setdefault(iid, {"name": it.get("item_name") or "Unknown", "revenue": 0.0})
+            rec["revenue"] += _num(it.get("line_total"))
+            rec["name"] = it.get("item_name") or rec["name"]
+    return by_item
+
+
+async def _outstanding_advances_sum() -> float:
+    """Sum of positive outstanding balances across OUTSTANDING advances."""
+    total = 0.0
+    async for a in salary_advances_collection().find({"status": "OUTSTANDING"}, {"outstanding": 1}):
+        amt = _num(a.get("outstanding"))
+        if amt > 0:
+            total += amt
+    return total
+
+
 @router.get("/dashboard")
 async def dashboard(
     current_user: dict = Depends(require_capability("dashboard:read")),
@@ -101,9 +152,32 @@ async def dashboard(
     month_prefix = now.strftime("%Y-%m")
     six_months_ago = (now - timedelta(days=183)).date().isoformat()
 
-    # Aggregations (done server-side; no full-document scans)
-    txn_by_date = await _txn_by_date()
-    exp_by_date = await _exp_by_date()
+    # All level-1 reads are independent — issue them concurrently instead of
+    # ~13 sequential round-trips (result values are unchanged).
+    (txn_by_date, exp_by_date, billed_map, paid_map, customer_rows, exp_rows,
+     by_item, att_today, active_employees, total_customers,
+     draft_slips_month, unpaid_slips_month, outstanding_advances) = await asyncio.gather(
+        _txn_by_date(),
+        _exp_by_date(),
+        _billed_by_customer(),
+        _paid_by_customer(),
+        _customer_revenue_top6(),
+        _expense_breakdown_rows(),
+        _top_items(),
+        attendance_collection().find({"date": today}).to_list(length=None),
+        employees_collection().count_documents({"is_active": True}),
+        customers_collection().count_documents({}),
+        salary_slips_collection().count_documents({
+            "period_start": {"$regex": f"^{month_prefix}"},
+            "status": "DRAFT",
+        }),
+        salary_slips_collection().count_documents({
+            "period_start": {"$regex": f"^{month_prefix}"},
+            "status": {"$in": ["FINALIZED", "PAID"]},
+            "paid": {"$ne": True},
+        }),
+        _outstanding_advances_sum(),
+    )
 
     today_revenue = round(_num(txn_by_date.get(today, {}).get("amount")), 2)
     month_revenue = round(sum(v["amount"] for k, v in txn_by_date.items() if k.startswith(month_prefix)), 2)
@@ -127,16 +201,9 @@ async def dashboard(
         monthly_profit.append({"month": label, "profit": round(rev - exp, 2)})
 
     # Outstanding payments (billed - paid per customer)
-    billed_map = await _billed_by_customer()
-    paid_map = await _paid_by_customer()
     outstanding = sum(max(billed_map.get(cid, 0.0) - paid_map.get(cid, 0.0), 0.0) for cid in set(billed_map) | set(paid_map))
 
     # Top customers by revenue
-    customer_rows = await transactions_collection().aggregate([
-        {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "revenue": {"$sum": "$total_amount"}}},
-        {"$sort": {"revenue": -1}},
-        {"$limit": 6},
-    ]).to_list(length=None)
     name_cache: dict = {}
     top_customers = []
     for r in customer_rows:
@@ -153,34 +220,13 @@ async def dashboard(
         name = (name_cache.get(cid) or "Unknown").strip() or "Unknown"
         top_customers.append({"name": name, "revenue": round(r.get("revenue") or 0, 2)})
 
-    # Top items by revenue (only the projected `items` field is fetched/decrypted)
-    by_item: dict = {}
-    cursor = transactions_collection().find({}, {"items": 1})
-    async for doc in cursor:
-        if "items" not in doc:
-            continue
-        try:
-            dec = decrypt_dict(doc, ["items"])
-        except (ValueError, KeyError):
-            continue
-        for it in dec.get("items") or []:
-            iid = str(it.get("item_id") or "")
-            if not iid:
-                continue
-            rec = by_item.setdefault(iid, {"name": it.get("item_name") or "Unknown", "revenue": 0.0})
-            rec["revenue"] += _num(it.get("line_total"))
-            rec["name"] = it.get("item_name") or rec["name"]
+    # Top items by revenue
     top_items = [
         {"name": rec["name"], "revenue": round(rec["revenue"], 2)}
         for rec in sorted(by_item.values(), key=lambda x: x["revenue"], reverse=True)[:5]
     ]
 
     # Expense breakdown (aggregated by category, names decrypted on demand)
-    exp_rows = await expenses_collection().aggregate([
-        {"$group": {"_id": {"$ifNull": ["$category_id", "Uncategorized"]}, "amount": {"$sum": "$amount"}}},
-        {"$sort": {"amount": -1}},
-        {"$limit": 6},
-    ]).to_list(length=None)
     cat_name_cache: dict = {}
     expense_breakdown = []
     for r in exp_rows:
@@ -195,24 +241,8 @@ async def dashboard(
         expense_breakdown.append({"category": name, "amount": round(r.get("amount") or 0, 2)})
 
     # Workforce stats
-    active_employees = await employees_collection().count_documents({"is_active": True})
-    att_today = await attendance_collection().find({"date": today}).to_list(length=None)
     present_today = sum(1 for a in att_today if (a.get("status") or "").upper() in ("PRESENT", "HALF_DAY"))
     on_leave_today = sum(1 for a in att_today if (a.get("status") or "").upper() in ("PAID_LEAVE", "ON_LEAVE", "UNPAID_LEAVE"))
-    draft_slips_month = await salary_slips_collection().count_documents({
-        "period_start": {"$regex": f"^{month_prefix}"},
-        "status": "DRAFT",
-    })
-    unpaid_slips_month = await salary_slips_collection().count_documents({
-        "period_start": {"$regex": f"^{month_prefix}"},
-        "status": {"$in": ["FINALIZED", "PAID"]},
-        "paid": {"$ne": True},
-    })
-    outstanding_advances = 0.0
-    async for a in salary_advances_collection().find({"status": "OUTSTANDING"}):
-        amt = _num(a.get("outstanding"))
-        if amt > 0:
-            outstanding_advances += amt
 
     return {
         "today_revenue": today_revenue,
@@ -220,7 +250,7 @@ async def dashboard(
         "six_month_revenue": six_month_revenue,
         "net_profit": net_profit,
         "total_pieces": total_pieces,
-        "total_customers": await customers_collection().count_documents({}),
+        "total_customers": total_customers,
         "total_expenses": total_expenses,
         "outstanding_payments": round(outstanding, 2),
         "active_employees": active_employees,
