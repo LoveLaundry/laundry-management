@@ -140,6 +140,7 @@ async def ensure_indexes() -> None:
     await transactions_collection().create_index("import_batch_id", background=True)
     await transactions_collection().create_index("employee_id", background=True)
     await transactions_collection().create_index("source", background=True)
+    await transactions_collection().create_index("item_ids", background=True)
 
     await payments_collection().create_index("customer_id", background=True)
     await payments_collection().create_index("payment_date", background=True)

@@ -87,31 +87,32 @@ async def customer_summary(
     txn_sens = ["customer_name", "invoice_number", "items", "notes"]
     pay_sens = ["customer_name", "reference", "notes"]
 
+    # The only consumed fields (customer_id, total_amount, total_quantity) are
+    # not encrypted, so aggregate server-side instead of transferring + decrypting
+    # the full collections.
+    txn_rows = await transactions_collection().aggregate([
+        {"$group": {
+            "_id": {"$toString": {"$ifNull": ["$customer_id", ""]}},
+            "revenue": {"$sum": "$total_amount"},
+            "qty": {"$sum": "$total_quantity"},
+            "count": {"$sum": 1},
+        }},
+    ]).to_list(length=None)
     revenue_map: dict = {}
     qty_map: dict = {}
     txn_count: dict = {}
-    for doc in await transactions_collection().find().to_list(length=None):
-        try:
-            txn = serialize(doc, txn_sens)
-        except (ValueError, KeyError):
-            txn = {"customer_id": doc.get("customer_id"), "total_amount": 0, "total_quantity": 0}
-        cid = str(txn.get("customer_id") or "")
+    for r in txn_rows:
+        cid = str(r.get("_id") or "")
         if not cid:
             continue
-        revenue_map[cid] = revenue_map.get(cid, 0) + _num(txn.get("total_amount"))
-        qty_map[cid] = qty_map.get(cid, 0) + _num(txn.get("total_quantity"))
-        txn_count[cid] = txn_count.get(cid, 0) + 1
+        revenue_map[cid] = r.get("revenue") or 0
+        qty_map[cid] = r.get("qty") or 0
+        txn_count[cid] = r.get("count") or 0
 
-    paid_map: dict = {}
-    for doc in await payments_collection().find().to_list(length=None):
-        try:
-            pay = serialize(doc, pay_sens)
-        except (ValueError, KeyError):
-            pay = {"customer_id": doc.get("customer_id"), "amount": 0}
-        cid = str(pay.get("customer_id") or "")
-        if not cid:
-            continue
-        paid_map[cid] = paid_map.get(cid, 0) + _num(pay.get("amount"))
+    pay_rows = await payments_collection().aggregate([
+        {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "amount": {"$sum": "$amount"}}},
+    ]).to_list(length=None)
+    paid_map: dict = {str(r.get("_id") or ""): r.get("amount") or 0 for r in pay_rows}
 
     cursor = customers_collection().find({}).sort("created_at", -1)
     result = []

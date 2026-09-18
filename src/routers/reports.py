@@ -228,20 +228,29 @@ async def outstanding_report(
     current_user: dict = Depends(require_capability("report:read")),
 ):
     billed_map: dict = {}
-    for t in await _dec_transactions({}):
+    # Only customer_id / customer_name / total_amount are consumed — project them
+    # (plus encryption_metadata so customer_name can be decrypted) instead of
+    # transferring full documents with their (large) encrypted items arrays.
+    txn_cursor = transactions_collection().find({}, {
+        "customer_id": 1, "customer_name": 1, "total_amount": 1, "encryption_metadata": 1,
+    })
+
+    def _snap(doc: dict) -> dict:
+        try:
+            return serialize(doc, TXN_SENSITIVE)
+        except (ValueError, KeyError):
+            return {k: v for k, v in doc.items() if k != "encryption_metadata" and not k.endswith("_search")}
+
+    for t in [_snap(doc) async for doc in txn_cursor]:
         cid = str(t.get("customer_id") or "")
         billed_map.setdefault(cid, {"name": t.get("customer_name") or "Unknown", "billed": 0.0})
         billed_map[cid]["billed"] += _num(t.get("total_amount"))
         billed_map[cid]["name"] = t.get("customer_name") or billed_map[cid]["name"]
 
-    paid_map: dict = {}
-    for doc in await payments_collection().find().to_list(length=None):
-        try:
-            pay = serialize(doc, PAY_SENSITIVE)
-        except (ValueError, KeyError):
-            continue
-        cid = str(pay.get("customer_id") or "")
-        paid_map[cid] = paid_map.get(cid, 0.0) + _num(pay.get("amount"))
+    paid_rows = await payments_collection().aggregate([
+        {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "amount": {"$sum": "$amount"}}},
+    ]).to_list(length=None)
+    paid_map: dict = {str(r.get("_id") or ""): r.get("amount") or 0.0 for r in paid_rows}
 
     result = []
     for cid in sorted(set(billed_map) | set(paid_map)):
