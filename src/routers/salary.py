@@ -1,3 +1,4 @@
+import asyncio
 import calendar
 from datetime import date as date_cls, datetime, timezone
 from typing import Optional
@@ -122,6 +123,86 @@ async def _get_outstanding_advances(employee_id: str) -> list:
     return [doc async for doc in cursor]
 
 
+async def _collect(cursor) -> list:
+    return [doc async for doc in cursor]
+
+
+async def _prefetch_payroll_data(
+    employee_ids: list,
+    start_date: str,
+    end_date: str,
+) -> dict:
+    """Load every payroll input for a batch of employees in a handful of queries
+    instead of ~6 sequential round-trips per employee (N+1)."""
+    ids = list(employee_ids)
+    if not ids:
+        return {
+            "settings": await _get_company_settings(),
+            "holiday_dates": set(),
+            "packages": {},
+            "attendance": {},
+            "extra_work": {},
+            "advances": {},
+            "slips": {},
+        }
+
+    settings_fut = _get_company_settings()
+    holidays_fut = _get_holiday_dates(start_date, end_date)
+    packages_fut = _collect(salary_packages_collection().find({
+        "employee_id": {"$in": ids},
+        "month": start_date[:7],
+    }))
+    attendance_fut = _collect(attendance_collection().find({
+        "employee_id": {"$in": ids},
+        "date": {"$gte": start_date, "$lte": end_date},
+    }))
+    extra_work_fut = _collect(extra_work_records_collection().find({
+        "employee_id": {"$in": ids},
+        "date": {"$gte": start_date, "$lte": end_date},
+    }))
+    advances_fut = _collect(salary_advances_collection().find({
+        "employee_id": {"$in": ids},
+        "status": "OUTSTANDING",
+    }).sort("date", 1))
+    slips_fut = _collect(salary_slips_collection().find({
+        "employee_id": {"$in": ids},
+        "period_start": start_date,
+        "period_end": end_date,
+        "status": {"$nin": ["CANCELLED", "DELETED"]},
+    }))
+
+    settings, holiday_dates, packages, attendance, extra_work, advances, slips = await asyncio.gather(
+        settings_fut, holidays_fut, packages_fut, attendance_fut,
+        extra_work_fut, advances_fut, slips_fut,
+    )
+
+    by_package: dict = {}
+    for doc in packages:
+        by_package.setdefault(doc.get("employee_id"), doc)
+
+    def _group(records: list) -> dict:
+        grouped: dict = {}
+        for rec in records:
+            grouped.setdefault(rec.get("employee_id"), []).append(rec)
+        for lst in grouped.values():
+            lst.sort(key=lambda r: str(r.get("date") or ""))
+        return {k: v for k, v in grouped.items() if k is not None}
+
+    by_slip: dict = {}
+    for doc in slips:
+        by_slip.setdefault(doc.get("employee_id"), doc)
+
+    return {
+        "settings": settings,
+        "holiday_dates": holiday_dates,
+        "packages": by_package,
+        "attendance": _group(attendance),
+        "extra_work": _group(extra_work),
+        "advances": _group(advances),
+        "slips": by_slip,
+    }
+
+
 # ── Generic Period Salary Calculation ─────────────────────────────────────
 async def _calculate_period_salary(
     emp: dict,
@@ -129,15 +210,42 @@ async def _calculate_period_salary(
     start_date: str,
     end_date: str,
     period_type: str = "MONTHLY",
+    preloaded: Optional[dict] = None,
 ) -> dict:
-    """Calculate salary for an arbitrary date period (monthly / weekly / custom)."""
-    employee_id = str(emp["_id"])
-    settings = await _get_company_settings()
+    """Calculate salary for an arbitrary date period (monthly / weekly / custom).
 
-    salary_pkg = await salary_packages_collection().find_one({
-        "employee_id": employee_id,
-        "month": start_date[:7],
-    })
+    When ``preloaded`` is provided (batch payroll), all reads come from the
+    prefetched maps instead of issuing per-employee database queries.
+    """
+    employee_id = str(emp["_id"])
+
+    if preloaded is not None:
+        settings = preloaded["settings"]
+        holiday_dates = preloaded["holiday_dates"]
+        salary_pkg = preloaded["packages"].get(employee_id)
+        attendance_records = preloaded["attendance"].get(employee_id, [])
+        extra_work_records = preloaded["extra_work"].get(employee_id, [])
+        outstanding_advances = preloaded["advances"].get(employee_id, [])
+        existing_slip = preloaded["slips"].get(employee_id)
+    else:
+        settings = await _get_company_settings()
+
+        salary_pkg = await salary_packages_collection().find_one({
+            "employee_id": employee_id,
+            "month": start_date[:7],
+        })
+
+        holiday_dates = await _get_holiday_dates(start_date, end_date)
+        attendance_records = await _get_attendance(employee_id, start_date, end_date)
+        extra_work_records = await _get_extra_work(employee_id, start_date, end_date)
+        outstanding_advances = await _get_outstanding_advances(employee_id)
+
+        existing_slip = await salary_slips_collection().find_one({
+            "employee_id": employee_id,
+            "period_start": start_date,
+            "period_end": end_date,
+            "status": {"$nin": ["CANCELLED", "DELETED"]},
+        })
 
     def _arr(field, default):
         if salary_pkg is not None and field in salary_pkg and salary_pkg.get(field) is not None:
@@ -197,9 +305,6 @@ async def _calculate_period_salary(
 
     if effective_end < effective_start:
         effective_end = effective_start
-
-    holiday_dates = await _get_holiday_dates(start_date, end_date)
-    attendance_records = await _get_attendance(employee_id, start_date, end_date)
 
     total_working_days = 0
     worked_days = 0.0
@@ -313,7 +418,6 @@ async def _calculate_period_salary(
         else:
             allowance_for_period = round(allowance_fixed, 2)
 
-    extra_work_records = await _get_extra_work(employee_id, start_date, end_date)
     extra_work_total = 0.0
     extra_work_details = []
     for ew in extra_work_records:
@@ -363,7 +467,6 @@ async def _calculate_period_salary(
     if etf_rate > 0:
         etf_employer = round(etf_basis * etf_rate / 100, 2)
 
-    outstanding_advances = await _get_outstanding_advances(employee_id)
     total_advance_deductions = 0.0
     advance_details = []
     for adv in outstanding_advances:
@@ -380,13 +483,6 @@ async def _calculate_period_salary(
     gross_salary = round(base_salary_for_period + overtime_pay + extra_work_total + allowance_for_period + bonus_total + other_payments_total, 2)
     total_deductions = round(epf_employee + total_advance_deductions + other_deductions_total, 2)
     net_salary = round(gross_salary - total_deductions, 2)
-
-    existing_slip = await salary_slips_collection().find_one({
-        "employee_id": employee_id,
-        "period_start": start_date,
-        "period_end": end_date,
-        "status": {"$nin": ["CANCELLED", "DELETED"]},
-    })
 
     return {
         "employee_id": employee_id,
@@ -1108,15 +1204,27 @@ async def payroll_preview(
     start_date = f"{year:04d}-{month:02d}-01"
     end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
 
+    emps = [emp async for emp in employees_collection().find({"is_active": True})]
+
     results = []
-    cursor = employees_collection().find({"is_active": True})
-    async for emp in cursor:
-        try:
-            emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
-            calc = await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, "MONTHLY")
-        except Exception:
-            continue
-        results.append(calc)
+    if emps:
+        preloaded = await _prefetch_payroll_data(
+            [str(e["_id"]) for e in emps], start_date, end_date,
+        )
+        sem = asyncio.Semaphore(8)
+
+        async def _calc(emp: dict) -> dict:
+            async with sem:
+                emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
+                return await _calculate_period_salary(
+                    emp, emp_decrypted, start_date, end_date, "MONTHLY", preloaded=preloaded,
+                )
+
+        outs = await asyncio.gather(*(_calc(e) for e in emps), return_exceptions=True)
+        for out in outs:
+            if isinstance(out, Exception):
+                continue
+            results.append(out)
 
     results.sort(key=lambda r: str(r.get("employee_name") or ""))
     return {
@@ -1143,63 +1251,87 @@ async def run_payroll(
     start_date = f"{year:04d}-{month:02d}-01"
     end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
 
-    created = []
+    emps = [emp async for emp in employees_collection().find({"is_active": True})]
+
     skipped = []
+    to_create = []
+    preloaded = None
+    if emps:
+        preloaded = await _prefetch_payroll_data(
+            [str(e["_id"]) for e in emps], start_date, end_date,
+        )
+        for emp in emps:
+            employee_id = str(emp["_id"])
+            existing = preloaded["slips"].get(employee_id)
+            if existing:
+                skipped.append({"employee_id": employee_id, "slip_id": str(existing["_id"])})
+                continue
+            to_create.append(emp)
+
+    created = []
     failed = []
-    cursor = employees_collection().find({"is_active": True})
-    async for emp in cursor:
-        employee_id = str(emp["_id"])
-        existing = await salary_slips_collection().find_one({
-            "employee_id": employee_id,
-            "period_start": start_date,
-            "period_end": end_date,
-            "status": {"$nin": ["CANCELLED", "DELETED"]},
-        })
-        if existing:
-            skipped.append({"employee_id": employee_id, "slip_id": str(existing["_id"])})
-            continue
-        try:
-            emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
-            calc = await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, "MONTHLY")
-            payload = SalarySlipCreate(
-                employee_id=employee_id,
-                period_type="MONTHLY",
-                period_start=date_cls.fromisoformat(start_date),
-                period_end=date_cls.fromisoformat(end_date),
-                basic_salary=_num(calc.get("basic_salary")),
-                adjusted_base_salary=_num(calc.get("adjusted_base_salary")),
-                base_salary_for_period=_num(calc.get("base_salary_for_period")),
-                calendar_days=int(calc.get("calendar_days") or 30),
-                working_days=int(calc.get("total_working_days") or 0),
-                worked_days=_num(calc.get("worked_days")),
-                absent_days=_num(calc.get("absent_days")),
-                leave_days=_num(calc.get("leave_days")),
-                holiday_count=int(calc.get("holiday_count") or 0),
-                weekend_count=int(calc.get("weekend_count") or 0),
-                overtime_hours=_num(calc.get("overtime_hours")),
-                overtime_rate=_num(calc.get("overtime_rate")),
-                overtime_pay=_num(calc.get("overtime_pay")),
-                extra_work_total=_num(calc.get("extra_work_total")),
-                extra_work_details=calc.get("extra_work_details") or [],
-                allowances=_num(calc.get("allowance_for_period")),
-                bonus=_num(calc.get("bonus")),
-                other_payments=_num(calc.get("other_payments")),
-                other_deductions=_num(calc.get("other_deductions")),
-                components=calc.get("components") or [],
-                attendance_required=bool(calc.get("attendance_required", True)),
-                calculation_method=calc.get("calculation_method") or "MONTHLY_ATTENDANCE",
-                epf_employee=_num(calc.get("epf_employee")),
-                epf_employer=_num(calc.get("epf_employer")),
-                etf_employer=_num(calc.get("etf_employer")),
-                epf_base=calc.get("epf_base") or "ADJUSTED",
-                advance_deductions=_num(calc.get("advance_deductions")),
-                advance_details=calc.get("advance_details") or [],
-                status="DRAFT",
-            )
-            slip = await create_salary_slip(payload, current_user)
-            created.append(slip)
-        except Exception as exc:
-            failed.append({"employee_id": employee_id, "error": str(exc)})
+
+    if to_create:
+        sem = asyncio.Semaphore(6)
+
+        async def _create(emp: dict) -> tuple:
+            employee_id = str(emp["_id"])
+            try:
+                async with sem:
+                    emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
+                    calc = await _calculate_period_salary(
+                        emp, emp_decrypted, start_date, end_date, "MONTHLY", preloaded=preloaded,
+                    )
+                    payload = SalarySlipCreate(
+                        employee_id=employee_id,
+                        period_type="MONTHLY",
+                        period_start=date_cls.fromisoformat(start_date),
+                        period_end=date_cls.fromisoformat(end_date),
+                        basic_salary=_num(calc.get("basic_salary")),
+                        adjusted_base_salary=_num(calc.get("adjusted_base_salary")),
+                        base_salary_for_period=_num(calc.get("base_salary_for_period")),
+                        calendar_days=int(calc.get("calendar_days") or 30),
+                        working_days=int(calc.get("total_working_days") or 0),
+                        worked_days=_num(calc.get("worked_days")),
+                        absent_days=_num(calc.get("absent_days")),
+                        leave_days=_num(calc.get("leave_days")),
+                        holiday_count=int(calc.get("holiday_count") or 0),
+                        weekend_count=int(calc.get("weekend_count") or 0),
+                        overtime_hours=_num(calc.get("overtime_hours")),
+                        overtime_rate=_num(calc.get("overtime_rate")),
+                        overtime_pay=_num(calc.get("overtime_pay")),
+                        extra_work_total=_num(calc.get("extra_work_total")),
+                        extra_work_details=calc.get("extra_work_details") or [],
+                        allowances=_num(calc.get("allowance_for_period")),
+                        bonus=_num(calc.get("bonus")),
+                        other_payments=_num(calc.get("other_payments")),
+                        other_deductions=_num(calc.get("other_deductions")),
+                        components=calc.get("components") or [],
+                        attendance_required=bool(calc.get("attendance_required", True)),
+                        calculation_method=calc.get("calculation_method") or "MONTHLY_ATTENDANCE",
+                        epf_employee=_num(calc.get("epf_employee")),
+                        epf_employer=_num(calc.get("epf_employer")),
+                        etf_employer=_num(calc.get("etf_employer")),
+                        epf_base=calc.get("epf_base") or "ADJUSTED",
+                        advance_deductions=_num(calc.get("advance_deductions")),
+                        advance_details=calc.get("advance_details") or [],
+                        status="DRAFT",
+                    )
+                    slip = await create_salary_slip(payload, current_user)
+                    return ("ok", slip)
+            except Exception as exc:
+                return ("err", {"employee_id": employee_id, "error": str(exc)})
+
+        outs = await asyncio.gather(*(_create(e) for e in to_create), return_exceptions=True)
+        for out in outs:
+            if isinstance(out, Exception):
+                failed.append({"employee_id": "", "error": str(out)})
+                continue
+            kind, value = out
+            if kind == "ok":
+                created.append(value)
+            else:
+                failed.append(value)
 
     await log_audit(
         str(current_user.get("user_id", "")),
