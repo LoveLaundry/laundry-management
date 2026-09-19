@@ -546,6 +546,10 @@ async def _calculate_period_salary(
         "net_salary": net_salary,
         "existing_slip_id": str(existing_slip["_id"]) if existing_slip else None,
         "existing_slip_status": existing_slip.get("status") if existing_slip else None,
+        "existing_slip_period": (
+            f"{existing_slip.get('period_start')} to {existing_slip.get('period_end')}"
+            if existing_slip else None
+        ),
     }
 
 
