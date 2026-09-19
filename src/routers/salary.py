@@ -211,11 +211,16 @@ async def _calculate_period_salary(
     end_date: str,
     period_type: str = "MONTHLY",
     preloaded: Optional[dict] = None,
+    full_attendance: bool = False,
 ) -> dict:
     """Calculate salary for an arbitrary date period (monthly / weekly / custom).
 
     When ``preloaded`` is provided (batch payroll), all reads come from the
     prefetched maps instead of issuing per-employee database queries.
+
+    When ``full_attendance`` is True every working day counts as attended,
+    regardless of what has been recorded so far — used to project what the
+    month would pay out if all employees attend all remaining days.
     """
     employee_id = str(emp["_id"])
 
@@ -335,6 +340,12 @@ async def _calculate_period_salary(
 
         total_working_days += 1
         att = attendance_by_date.get(date_str)
+        if full_attendance:
+            worked_days += 1
+            if att:
+                total_ot_hours += _num(att.get("overtime_hours"))
+            day = date_cls.fromordinal(day.toordinal() + 1)
+            continue
         if att:
             status = (att.get("status") or "ABSENT").upper()
             if status in ("PRESENT",):
@@ -1216,9 +1227,22 @@ async def payroll_preview(
         async def _calc(emp: dict) -> dict:
             async with sem:
                 emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
-                return await _calculate_period_salary(
+                calc = await _calculate_period_salary(
                     emp, emp_decrypted, start_date, end_date, "MONTHLY", preloaded=preloaded,
                 )
+                if not calc.get("attendance_required"):
+                    calc["projected_worked_days"] = calc.get("worked_days")
+                    calc["projected_gross_salary"] = _num(calc.get("gross_salary"))
+                    calc["projected_net_salary"] = _num(calc.get("net_salary"))
+                else:
+                    projected = await _calculate_period_salary(
+                        emp, emp_decrypted, start_date, end_date, "MONTHLY",
+                        preloaded=preloaded, full_attendance=True,
+                    )
+                    calc["projected_worked_days"] = int(projected.get("worked_days") or 0)
+                    calc["projected_gross_salary"] = round(_num(projected.get("gross_salary")), 2)
+                    calc["projected_net_salary"] = round(_num(projected.get("net_salary")), 2)
+                return calc
 
         outs = await asyncio.gather(*(_calc(e) for e in emps), return_exceptions=True)
         for out in outs:
@@ -1227,6 +1251,8 @@ async def payroll_preview(
             results.append(out)
 
     results.sort(key=lambda r: str(r.get("employee_name") or ""))
+    total_net = round(sum(_num(r.get("net_salary")) for r in results), 2)
+    projected_total_net = round(sum(_num(r.get("projected_net_salary")) for r in results), 2)
     return {
         "year": year,
         "month": month,
@@ -1235,7 +1261,11 @@ async def payroll_preview(
         "count": len(results),
         "total_gross": round(sum(_num(r.get("gross_salary")) for r in results), 2),
         "total_deductions": round(sum(_num(r.get("total_deductions")) for r in results), 2),
-        "total_net": round(sum(_num(r.get("net_salary")) for r in results), 2),
+        "total_net": total_net,
+        "projected_total_gross": round(sum(_num(r.get("projected_gross_salary")) for r in results), 2),
+        "projected_total_deductions": round(sum(_num(r.get("total_deductions")) for r in results), 2),
+        "projected_total_net": projected_total_net,
+        "projected_total_net_variance": round(projected_total_net - total_net, 2),
         "employees": results,
     }
 
