@@ -166,8 +166,8 @@ async def _prefetch_payroll_data(
     }).sort("date", 1))
     slips_fut = _collect(salary_slips_collection().find({
         "employee_id": {"$in": ids},
-        "period_start": start_date,
-        "period_end": end_date,
+        "period_start": {"$lte": end_date},
+        "period_end": {"$gte": start_date},
         "status": {"$nin": ["CANCELLED", "DELETED"]},
     }))
 
@@ -247,8 +247,8 @@ async def _calculate_period_salary(
 
         existing_slip = await salary_slips_collection().find_one({
             "employee_id": employee_id,
-            "period_start": start_date,
-            "period_end": end_date,
+            "period_start": {"$lte": end_date},
+            "period_end": {"$gte": start_date},
             "status": {"$nin": ["CANCELLED", "DELETED"]},
         })
 
@@ -590,6 +590,78 @@ async def calculate_period_salary(
 
 
 # ── Generate / Save Salary Slip ───────────────────────────────────────────
+async def _find_overlapping_slip(employee_id: str, start_str: str, end_str: str) -> Optional[dict]:
+    """Return the first non-cancelled/deleted slip whose date range overlaps
+    [start_str, end_str] for the same employee. Prevents the same date from
+    being paid more than once (e.g. weekly slip + custom range slip)."""
+    return await salary_slips_collection().find_one({
+        "employee_id": employee_id,
+        "status": {"$nin": ["CANCELLED", "DELETED"]},
+        "period_start": {"$lte": end_str},
+        "period_end": {"$gte": start_str},
+    })
+
+
+async def _validate_advance_details(advance_details: list, period_start_str: str) -> tuple:
+    """Validate slip advance deductions against the live advance balances.
+
+    Guarantees each advance is listed once, exists, is not over-deducted, and
+    returns (normalized details, total deduction) so the slip ledger matches
+    the advance ledger exactly.
+    """
+    if not advance_details:
+        return [], 0.0
+
+    seen = set()
+    total = 0.0
+    normalized = []
+    for d in advance_details:
+        adv_id = d.get("advance_id")
+        if not adv_id or not ObjectId.is_valid(adv_id):
+            continue
+        if adv_id in seen:
+            raise ConflictError(f"Advance {adv_id} is listed more than once on this slip")
+        seen.add(adv_id)
+
+    if not seen:
+        return [], 0.0
+
+    adv_docs = await salary_advances_collection().find(
+        {"_id": {"$in": [ObjectId(a) for a in seen]}}
+    ).to_list(length=None)
+    adv_map = {str(a["_id"]): a for a in adv_docs}
+
+    for d in advance_details:
+        adv_id = d.get("advance_id")
+        if not adv_id or not ObjectId.is_valid(adv_id):
+            continue
+        adv = adv_map.get(adv_id)
+        if not adv:
+            raise NotFoundError("Advance", adv_id)
+        amt = round(_num(d.get("amount_deducted")), 2)
+        outstanding = round(_num(adv.get("outstanding")), 2)
+        if amt < 0:
+            raise BadRequestError(f"Advance {adv_id} deduction amount cannot be negative")
+        if amt == 0:
+            continue
+        if amt > outstanding + 0.005:
+            raise ConflictError(
+                f"Deduction {amt:g} for advance {adv_id} exceeds its remaining balance {outstanding:g}"
+            )
+        total += amt
+        normalized.append({
+            "advance_id": adv_id,
+            "date": d.get("date") or period_start_str,
+            "original_amount": adv.get("amount"),
+            "amount_deducted": amt,
+            "reason": d.get("reason"),
+            "requested_amount": d.get("requested_amount"),
+            "status": adv.get("status", "OUTSTANDING"),
+        })
+
+    return normalized, round(total, 2)
+
+
 @router.post("/salary/slip")
 async def create_salary_slip(
     payload: SalarySlipCreate,
@@ -600,21 +672,29 @@ async def create_salary_slip(
     if not emp:
         raise NotFoundError("Employee", payload.employee_id)
 
-    existing = await salary_slips_collection().find_one({
-        "employee_id": payload.employee_id,
-        "period_start": payload.period_start.isoformat() if hasattr(payload.period_start, "isoformat") else str(payload.period_start),
-        "period_end": payload.period_end.isoformat() if hasattr(payload.period_end, "isoformat") else str(payload.period_end),
-        "status": {"$nin": ["CANCELLED", "DELETED"]},
-    })
+    if payload.period_end < payload.period_start:
+        raise BadRequestError("Period end cannot be before period start")
+
+    period_start_str = payload.period_start.isoformat() if hasattr(payload.period_start, "isoformat") else str(payload.period_start)
+    period_end_str = payload.period_end.isoformat() if hasattr(payload.period_end, "isoformat") else str(payload.period_end)
+
+    existing = await _find_overlapping_slip(payload.employee_id, period_start_str, period_end_str)
     if existing:
-        raise ConflictError(f"A salary slip already exists for this period (ID: {str(existing['_id'])})")
+        raise ConflictError(
+            f"Dates {period_start_str} to {period_end_str} are already covered by a previous salary slip "
+            f"(ID: {str(existing['_id'])}, {existing.get('period_start')} to {existing.get('period_end')}, "
+            f"status: {existing.get('status')}). A new slip may only cover dates not included in any previous slip."
+        )
+
+    advance_details, advance_deductions = await _validate_advance_details(
+        payload.advance_details or [], period_start_str,
+    )
+    if advance_details:
+        payload = payload.model_copy(update={"advance_deductions": advance_deductions})
 
     emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
     emp_name = emp_decrypted.get("name", "Unknown")
     salary_type = emp.get("salary_type", "MONTHLY")
-
-    period_start_str = payload.period_start.isoformat() if hasattr(payload.period_start, "isoformat") else str(payload.period_start)
-    period_end_str = payload.period_end.isoformat() if hasattr(payload.period_end, "isoformat") else str(payload.period_end)
 
     slip_count_for_emp = await salary_slips_collection().count_documents({
         "employee_id": payload.employee_id,
@@ -685,7 +765,7 @@ async def create_salary_slip(
         "epf_base": (payload.epf_base or "ADJUSTED").upper(),
         "total_earnings": total_earnings,
         "advance_deductions": round(_num(payload.advance_deductions), 2),
-        "advance_details": payload.advance_details or [],
+        "advance_details": advance_details,
         "loan_deduction": round(_num(payload.loan_deduction), 2),
         "other_deductions": round(_num(payload.other_deductions), 2),
         "total_deductions": total_deductions,
@@ -704,7 +784,7 @@ async def create_salary_slip(
 
     result = await salary_slips_collection().insert_one(doc)
 
-    for adv_detail in (payload.advance_details or []):
+    for adv_detail in advance_details:
         adv_id = adv_detail.get("advance_id")
         if adv_id and ObjectId.is_valid(adv_id):
             deducted_amt = _num(adv_detail.get("amount_deducted"))
