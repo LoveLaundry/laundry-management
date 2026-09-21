@@ -2,19 +2,31 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth_helper import require_capability
-from ..database.main_db import expenses_collection, expense_categories_collection
-from ..models import ExpenseCreate, ExpenseUpdate, ExpenseCategoryCreate, ExpenseCategoryUpdate
+from ..database.main_db import (
+    expenses_collection,
+    expense_categories_collection,
+    expense_templates_collection,
+)
+from ..models import (
+    ExpenseCreate,
+    ExpenseUpdate,
+    ExpenseCategoryCreate,
+    ExpenseCategoryUpdate,
+    ExpenseTemplateCreate,
+)
 from ..crypto_helper import encrypt_dict, decrypt_dict
 from ..router_utils import serialize, log_audit
 from ..error_responses import BadRequestError
+from ..services import idempotency
 
 router = APIRouter(tags=["Expenses"])
 
 SENSITIVE_FIELDS = ["description", "reference", "notes"]
 CAT_SENSITIVE = ["name", "description"]
+TEMPLATE_SENSITIVE = ["name", "description"]
 
 
 def _num(value) -> float:
@@ -136,7 +148,14 @@ async def list_expenses(
 async def create_expense(
     payload: ExpenseCreate,
     current_user: dict = Depends(require_capability("expense:write")),
+    request: Request = None,
 ):
+    user_id = str(current_user.get("user_id", ""))
+
+    # Idempotent create: retried posts do not duplicate the expense.
+    if await idempotency.was_processed(request, user_id):
+        return {"success": True, "duplicate": True}
+
     if payload.amount <= 0:
         raise BadRequestError("Amount must be greater than zero")
     category_name = await _resolve_category_name(payload.category_id, payload.category_name)
@@ -156,8 +175,68 @@ async def create_expense(
     encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
     result = await expenses_collection().insert_one(encrypted)
     await log_audit(str(current_user.get("user_id", "")), "create", "expense", str(result.inserted_id), details={"amount": payload.amount, "category": category_name})
+    await idempotency.mark_processed(request, user_id, "expense", str(result.inserted_id))
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, SENSITIVE_FIELDS)
+
+
+# ---------------- Expense Templates (fast daily entry) ----------------
+@router.get("/expenses/templates")
+async def list_expense_templates(
+    current_user: dict = Depends(require_capability("expense:read")),
+):
+    """Frequently-used expense presets for one-tap entry."""
+    cursor = (
+        expense_templates_collection()
+        .find({"is_active": {"$ne": False}})
+        .sort([("usage_count", -1), ("name_search", 1)])
+    )
+    return [serialize(doc, TEMPLATE_SENSITIVE) async for doc in cursor]
+
+
+@router.post("/expenses/templates")
+async def create_expense_template(
+    payload: ExpenseTemplateCreate,
+    current_user: dict = Depends(require_capability("expense:write")),
+):
+    if not payload.name.strip():
+        raise BadRequestError("Template name is required")
+    category_name = await _resolve_category_name(payload.category_id, payload.category_name)
+    now = datetime.now(timezone.utc)
+    doc = {
+        "name": payload.name.strip(),
+        "name_search": payload.name.strip().lower(),
+        "category_id": payload.category_id,
+        "category_name": category_name,
+        "description": (payload.description or "").strip() or None,
+        "default_amount": round(float(payload.default_amount or 0), 2),
+        "payment_method": payload.payment_method,
+        "usage_count": 0,
+        "is_active": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    encrypted = encrypt_dict(doc, TEMPLATE_SENSITIVE)
+    result = await expense_templates_collection().insert_one(encrypted)
+    encrypted["_id"] = result.inserted_id
+    return serialize(encrypted, TEMPLATE_SENSITIVE)
+
+
+@router.delete("/expenses/templates/{template_id}")
+async def delete_expense_template(
+    template_id: str,
+    current_user: dict = Depends(require_capability("expense:write")),
+):
+    oid = ObjectId(template_id) if ObjectId.is_valid(template_id) else None
+    if not oid:
+        raise HTTPException(status_code=404, detail="Template not found")
+    existing = await expense_templates_collection().find_one({"_id": oid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Template not found")
+    await expense_templates_collection().update_one(
+        {"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
+    )
+    return {"success": True}
 
 
 @router.put("/expenses/{expense_id}")

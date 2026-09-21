@@ -4,7 +4,7 @@ from datetime import date as date_cls, datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from ..auth_helper import require_capability
 from ..database.main_db import (
@@ -26,6 +26,7 @@ from ..models import (
 )
 from ..router_utils import serialize, log_audit
 from ..error_responses import NotFoundError, BadRequestError, ConflictError
+from ..services import idempotency
 
 router = APIRouter(tags=["Salary Management"])
 
@@ -1119,7 +1120,11 @@ async def bulk_set_attendance(
 async def bulk_day_attendance(
     payload: AttendanceBulkDay,
     current_user: dict = Depends(require_capability("salary:write")),
+    request: Request = None,
 ):
+    user_id = str(current_user.get("user_id", ""))
+    if await idempotency.was_processed(request, user_id):
+        return {"success": True, "count": 0, "duplicate": True}
     now = datetime.now(timezone.utc)
     date_str = payload.date.isoformat() if hasattr(payload.date, "isoformat") else payload.date
     count = 0
@@ -1155,6 +1160,7 @@ async def bulk_day_attendance(
         )
         count += 1
     await log_audit(str(current_user.get("user_id", "")), "bulk-set", "attendance", None, details={"date": date_str, "count": count})
+    await idempotency.mark_processed(request, user_id, "attendance_bulk_day", date_str)
     return {"success": True, "count": count}
 
 

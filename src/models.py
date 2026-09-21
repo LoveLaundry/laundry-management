@@ -538,6 +538,17 @@ class ExpenseUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class ExpenseTemplateCreate(BaseModel):
+    """A frequently-used expense preset for one-tap daily entry."""
+
+    name: str
+    category_id: Optional[str] = None
+    category_name: Optional[str] = None
+    description: Optional[str] = None
+    default_amount: float = 0.0
+    payment_method: str = "CASH"
+
+
 # ---------------- Bulk Import ----------------
 class BulkImportCreate(BaseModel):
     file_name: str

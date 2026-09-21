@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..auth_helper import require_capability
@@ -11,6 +11,7 @@ from ..models import TransactionCreate, TransactionUpdate
 from ..crypto_helper import get_search_token, encrypt_dict, decrypt_dict
 from ..router_utils import serialize, log_audit
 from ..error_responses import BadRequestError
+from ..services import idempotency
 
 router = APIRouter(tags=["Transactions"])
 
@@ -188,7 +189,11 @@ async def _store_transaction(txn: dict, current_user: dict) -> dict:
 async def bulk_create_transactions(
     payload: BulkTransactionRequest,
     current_user: dict = Depends(require_capability("transaction:write")),
+    request: Request = None,
 ):
+    user_id = str(current_user.get("user_id", ""))
+    if await idempotency.was_processed(request, user_id):
+        return []
     if not payload.transactions:
         raise BadRequestError("No transactions provided")
     created = []
@@ -201,6 +206,7 @@ async def bulk_create_transactions(
         None,
         details={"count": len(created), "total_amount": round(sum(t["total_amount"] for t in created), 2)},
     )
+    await idempotency.mark_processed(request, user_id, "transactions_bulk", None)
     return created
 
 

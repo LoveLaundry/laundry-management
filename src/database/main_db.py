@@ -27,8 +27,10 @@ EXTRA_WORK_RECORDS = "extra_work_records"
 COMPANY_SETTINGS = "company_settings"
 EXPENSE_CATEGORIES = "expense_categories"
 EXPENSES = "expenses"
+EXPENSE_TEMPLATES = "expense_templates"
 IMPORTS = "imports"
 AUDIT_LOGS = "audit_logs"
+IDEMPOTENCY_KEYS = "idempotency_keys"
 
 
 def _db() -> AsyncIOMotorDatabase:
@@ -111,6 +113,14 @@ def expenses_collection() -> AsyncIOMotorCollection:
     return _db()[EXPENSES]
 
 
+def expense_templates_collection() -> AsyncIOMotorCollection:
+    return _db()[EXPENSE_TEMPLATES]
+
+
+def idempotency_keys_collection() -> AsyncIOMotorCollection:
+    return _db()[IDEMPOTENCY_KEYS]
+
+
 def imports_collection() -> AsyncIOMotorCollection:
     return _db()[IMPORTS]
 
@@ -187,6 +197,12 @@ async def ensure_indexes() -> None:
     await expenses_collection().create_index("expense_date", background=True)
     await expenses_collection().create_index("category_id", background=True)
     await expenses_collection().create_index("date", background=True)
+
+    await expense_templates_collection().create_index("name_search", background=True)
+    await expense_templates_collection().create_index("is_active", background=True)
+
+    await idempotency_keys_collection().create_index("key", unique=True, background=True)
+    await idempotency_keys_collection().create_index("created_at", background=True)
 
     await imports_collection().create_index("status", background=True)
     await imports_collection().create_index("created_at", background=True)

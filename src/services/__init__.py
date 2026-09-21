@@ -1,0 +1,1 @@
+"""Shared services for the Laundry Management service."""
