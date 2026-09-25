@@ -8,22 +8,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import logging as _crypto_log
-_crypto_logger = _crypto_log.getLogger("crypto")
 _master_key = os.getenv("MASTER_KEY")
 if not _master_key:
-    _crypto_logger.warning("MASTER_KEY not set — using insecure fallback. Set MASTER_KEY in production!")
-_master_key = _master_key or "CHANGE-ME-IN-PRODUCTION-love-laundry-2026"
+    raise RuntimeError("FATAL: MASTER_KEY environment variable is not set. Refusing to start.")
 MASTER_KEY_ENV = _master_key
-
-# Track insecure defaults so the health endpoint can report them
-try:
-    from .security import mark_master_insecure
-    if not os.getenv("MASTER_KEY"):
-        mark_master_insecure()
-except ImportError:
-    pass
-
 KEK = hashlib.sha256((MASTER_KEY_ENV + "-kek").encode()).digest()
 HMAC_KEY = hashlib.sha256((MASTER_KEY_ENV + "-hmac").encode()).digest()
 

@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Laundry Management & Historical Records", version="1.0.0", lifespan=lifespan)
 
-from .security import apply_security, insecure_flags
+from .security import apply_security
 
 CACHEABLE_PATH_PREFIXES = ("/api/customers", "/api/items", "/api/salary/slips")
 
@@ -68,14 +68,12 @@ async def health():
     from .database.connection_manager import ping
 
     main_ok = await ping("main")
-    flags = insecure_flags()
     return {
         "status": "ok" if main_ok else "degraded",
         "database": "main" if main_ok else "unreachable",
         "security": {
             "headers": True,
             "rate_limiting": True,
-            "insecure_defaults": flags,
         },
     }
 
