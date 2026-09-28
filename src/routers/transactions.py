@@ -237,6 +237,19 @@ async def list_transactions(
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(require_capability("transaction:read")),
 ):
+    """Paginated transaction list.
+
+    Returns the `{items, total, limit, offset}` envelope that every other
+    paginated route here already uses (customers, items, expenses, payments,
+    advances, salary/slips, extra-work/records).
+
+    This route used to answer with a bare JSON array while still honouring
+    `limit`/`offset`. The transactions page reads `response.items` for its rows
+    and `response.total` for the pager, so on an array both were `undefined` and
+    `items.reduce(...)` threw "Cannot read properties of undefined (reading
+    'reduce')" — a render-time crash that the error boundary reported as a 500,
+    with the pager unable to page at all.
+    """
     query: dict = {}
     if start_date:
         query["transaction_date"] = {"$gte": start_date}
@@ -249,8 +262,16 @@ async def list_transactions(
     if source:
         query["source"] = source.upper()
 
-    cursor = transactions_collection().find(query).sort("transaction_date", -1).skip(offset).limit(limit)
-    return [_serialize_txn(doc) async for doc in cursor]
+    total = await transactions_collection().count_documents(query)
+    cursor = (
+        transactions_collection()
+        .find(query)
+        .sort("transaction_date", -1)
+        .skip(offset)
+        .limit(limit)
+    )
+    items = [_serialize_txn(doc) async for doc in cursor]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/transactions/{transaction_id}")
