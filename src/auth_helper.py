@@ -56,16 +56,19 @@ ROLE_CAPABILITIES = {
         "payment:read", "payment:write",
         "report:read", "dashboard:read", "import:write",
     ],
+    # The counter role: takes orders, records payments, sees the day's takings.
+    #
+    # It deliberately has no payroll, HR, expense or reporting access. Those
+    # were readable by every STAFF token, so one compromised cashier account
+    # exposed every employee's salary, the full expense ledger and company-wide
+    # revenue. Anyone who can raise a payslip or a staff record needs MANAGER.
     "STAFF": [
         "management:read",
-        "customer:read",
+        "customer:read", "customer:write",
         "item:read",
         "transaction:read", "transaction:write",
-        "expense:read",
-        "employee:read",
-        "salary:read",
         "payment:read",
-        "report:read", "dashboard:read",
+        "dashboard:read",
     ],
 }
 
