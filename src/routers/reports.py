@@ -18,6 +18,7 @@ from ..database.main_db import (
     salaries_collection,
 )
 from ..crypto_helper import decrypt_dict
+from app_time import this_month_number, this_year, today_str
 from ..router_utils import serialize
 
 router = APIRouter(tags=["Reports"])
@@ -39,7 +40,8 @@ def _num(value) -> float:
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+    """Today on the Sri Lankan clock — the day the staff actually work."""
+    return today_str()
 
 
 async def _dec_transactions(query: dict) -> list:
@@ -185,8 +187,8 @@ async def daily_report(
 
 @router.get("/reports/monthly")
 async def monthly_report(
-    year: int = Query(datetime.now(timezone.utc).year),
-    month: int = Query(datetime.now(timezone.utc).month),
+    year: int = Query(this_year()),
+    month: int = Query(this_month_number()),
     current_user: dict = Depends(require_capability("report:read")),
 ):
     start = f"{year:04d}-{month:02d}-01"

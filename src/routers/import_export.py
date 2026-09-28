@@ -18,6 +18,7 @@ from ..database.main_db import (
     imports_collection,
 )
 from ..crypto_helper import encrypt_dict, decrypt_dict, get_search_token
+from app_time import lkt_date_str
 from ..router_utils import serialize, log_audit
 
 router = APIRouter(tags=["Import & Export"])
@@ -50,7 +51,8 @@ def _num(value) -> float:
 
 def _fmt_date(value) -> Optional[str]:
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d")
+        # A stored instant lands on its Sri Lankan calendar date.
+        return lkt_date_str(value)
     if isinstance(value, date_type):
         return value.isoformat()
     s = str(value or "").strip()

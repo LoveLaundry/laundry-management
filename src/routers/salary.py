@@ -26,6 +26,7 @@ from ..models import (
 )
 from ..router_utils import serialize, log_audit
 from ..error_responses import NotFoundError, BadRequestError, ConflictError
+from app_time import UTC, naive_stamp, today_str
 from ..services import idempotency
 
 router = APIRouter(tags=["Salary Management"])
@@ -1023,7 +1024,7 @@ async def delete_salary_slip(
         {"_id": oid},
         {"$set": {
             "status": "DELETED",
-            "deleted_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "deleted_at": naive_stamp(datetime.now(UTC)),
             "updated_at": datetime.now(timezone.utc),
         }},
     )
@@ -1057,7 +1058,7 @@ async def mark_salary_paid(
         {"$set": {
             "amount_paid": round(amount, 2),
             "paid": True,
-            "paid_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "paid_date": today_str(),
             "updated_at": datetime.now(timezone.utc),
         }},
     )
