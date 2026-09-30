@@ -19,7 +19,7 @@ from ..database.main_db import (
     salary_advances_collection,
     salary_slips_collection,
 )
-from app_time import add_months, this_month, today_str
+from ..app_time import add_months, this_month, today_str
 from ..crypto_helper import decrypt_dict
 
 router = APIRouter(tags=["Dashboard"])

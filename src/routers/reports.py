@@ -18,7 +18,7 @@ from ..database.main_db import (
     salaries_collection,
 )
 from ..crypto_helper import decrypt_dict
-from app_time import this_month_number, this_year, today_str
+from ..app_time import this_month_number, this_year, today_str
 from ..router_utils import serialize
 
 router = APIRouter(tags=["Reports"])

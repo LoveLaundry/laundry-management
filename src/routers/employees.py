@@ -9,7 +9,7 @@ from ..database.main_db import employees_collection, salaries_collection, attend
 from ..models import EmployeeCreate, EmployeeUpdate, SalaryCreate, SalaryUpdate, AttendanceCreate, AttendanceUpdate
 from ..crypto_helper import encrypt_dict, decrypt_dict, get_search_token, encrypt_fields_for_update
 from ..router_utils import serialize, log_audit
-from app_time import this_year
+from ..app_time import this_year
 from ..error_responses import BadRequestError, ConflictError
 
 router = APIRouter(tags=["Employees & Salaries"])
