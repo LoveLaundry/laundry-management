@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from datetime import timedelta
 
 from bson import ObjectId
@@ -19,6 +19,7 @@ from ..database.main_db import (
     salary_advances_collection,
     salary_slips_collection,
 )
+from ..app_time import add_months, this_month, today_str
 from ..crypto_helper import decrypt_dict
 
 router = APIRouter(tags=["Dashboard"])
@@ -38,7 +39,8 @@ def _num(value) -> float:
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+    """Today on the Sri Lankan clock — the day the staff actually work."""
+    return today_str()
 
 
 def _str_key(value) -> str:
@@ -147,10 +149,9 @@ async def _outstanding_advances_sum() -> float:
 async def dashboard(
     current_user: dict = Depends(require_capability("dashboard:read")),
 ):
-    now = datetime.now(timezone.utc)
     today = _today()
-    month_prefix = now.strftime("%Y-%m")
-    six_months_ago = (now - timedelta(days=183)).date().isoformat()
+    month_prefix = this_month()
+    six_months_ago = add_months(date.fromisoformat(today), -6).isoformat()
 
     # All level-1 reads are independent — issue them concurrently instead of
     # ~13 sequential round-trips (result values are unchanged).
@@ -192,7 +193,8 @@ async def dashboard(
     monthly_revenue = []
     monthly_profit = []
     for i in range(5, -1, -1):
-        ref = now.replace(day=1) - timedelta(days=30 * i)
+        # Whole calendar months, not 30-day chunks, so buckets match real months.
+        ref = add_months(date.fromisoformat(today), -i)
         prefix = ref.strftime("%Y-%m")
         label = ref.strftime("%b")
         rev = round(sum(v["amount"] for k, v in txn_by_date.items() if k.startswith(prefix)), 2)

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from ..auth_helper import require_capability
 from ..database.main_db import categories_collection, items_collection, transactions_collection
 from ..models import CategoryCreate, CategoryUpdate, ItemCreate, ItemUpdate
-from ..crypto_helper import get_search_token, encrypt_dict, decrypt_dict
+from ..crypto_helper import get_search_token, encrypt_dict, decrypt_dict, encrypt_fields_for_update
 from ..router_utils import serialize, log_audit
 from ..error_responses import BadRequestError
 
@@ -68,6 +68,8 @@ async def update_category(
     if not existing:
         raise HTTPException(status_code=404, detail="Category not found")
     updates = payload.model_dump(exclude_none=True)
+    if any(k in CAT_SENSITIVE for k in updates):
+        updates = encrypt_fields_for_update(existing, updates, CAT_SENSITIVE)
     updates["updated_at"] = datetime.now(timezone.utc)
     if len(updates) > 1:
         await categories_collection().update_one({"_id": oid}, {"$set": updates})
@@ -210,6 +212,8 @@ async def update_item(
     if not existing:
         raise HTTPException(status_code=404, detail="Item not found")
     updates = payload.model_dump(exclude_none=True)
+    if any(k in ITEM_SENSITIVE for k in updates):
+        updates = encrypt_fields_for_update(existing, updates, ITEM_SENSITIVE)
     updates["updated_at"] = datetime.now(timezone.utc)
     if len(updates) > 1:
         await items_collection().update_one({"_id": oid}, {"$set": updates})

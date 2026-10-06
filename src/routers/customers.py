@@ -14,7 +14,7 @@ from ..database.main_db import (
     payments_collection,
 )
 from ..models import CustomerCreate, CustomerUpdate, CustomerRateCreate
-from ..crypto_helper import get_search_token, encrypt_dict
+from ..crypto_helper import get_search_token, encrypt_dict, encrypt_fields_for_update
 from ..router_utils import parse_object_id, serialize, log_audit
 
 router = APIRouter(tags=["Customers"])
@@ -157,6 +157,8 @@ async def update_customer(
 
     updates = payload.model_dump(exclude_none=True)
     updates = {k: v for k, v in updates.items() if k in SENSITIVE_FIELDS + ["customer_type", "billing_method", "payment_terms", "is_active"]}
+    if any(k in SENSITIVE_FIELDS for k in updates):
+        updates = encrypt_fields_for_update(existing, updates, SENSITIVE_FIELDS)
     updates["updated_at"] = datetime.now(timezone.utc)
 
     if len(updates) > 1:

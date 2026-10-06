@@ -8,22 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import logging as _auth_log
-_auth_logger = _auth_log.getLogger("auth")
 _jwt_secret = os.getenv("JWT_SECRET")
 if not _jwt_secret:
-    _auth_logger.warning("JWT_SECRET not set — using insecure fallback. Set JWT_SECRET in production!")
-_jwt_secret = _jwt_secret or "CHANGE-ME-IN-PRODUCTION-love-laundry-2026"
+    raise RuntimeError("FATAL: JWT_SECRET environment variable is not set. Refusing to start.")
 JWT_SECRET = _jwt_secret
 JWT_ALGORITHM = "HS256"
-
-# Track insecure defaults so the health endpoint can report them
-try:
-    from .security import mark_jwt_insecure
-    if not os.getenv("JWT_SECRET"):
-        mark_jwt_insecure()
-except ImportError:
-    pass
 
 security = HTTPBearer()
 
@@ -67,16 +56,19 @@ ROLE_CAPABILITIES = {
         "payment:read", "payment:write",
         "report:read", "dashboard:read", "import:write",
     ],
+    # The counter role: takes orders, records payments, sees the day's takings.
+    #
+    # It deliberately has no payroll, HR, expense or reporting access. Those
+    # were readable by every STAFF token, so one compromised cashier account
+    # exposed every employee's salary, the full expense ledger and company-wide
+    # revenue. Anyone who can raise a payslip or a staff record needs MANAGER.
     "STAFF": [
         "management:read",
-        "customer:read",
+        "customer:read", "customer:write",
         "item:read",
         "transaction:read", "transaction:write",
-        "expense:read",
-        "employee:read",
-        "salary:read",
         "payment:read",
-        "report:read", "dashboard:read",
+        "dashboard:read",
     ],
 }
 

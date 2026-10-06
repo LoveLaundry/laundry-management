@@ -17,7 +17,7 @@ from ..models import (
     ExpenseCategoryUpdate,
     ExpenseTemplateCreate,
 )
-from ..crypto_helper import encrypt_dict, decrypt_dict
+from ..crypto_helper import encrypt_dict, decrypt_dict, encrypt_fields_for_update
 from ..router_utils import serialize, log_audit
 from ..error_responses import BadRequestError
 from ..services import idempotency
@@ -265,6 +265,8 @@ async def update_expense(
             updates[key] = val
     if payload.category_name and payload.category_id:
         updates["category_name"] = await _resolve_category_name(payload.category_id, payload.category_name)
+    if any(k in SENSITIVE_FIELDS for k in updates):
+        updates = encrypt_fields_for_update(existing, updates, SENSITIVE_FIELDS)
     updates["updated_at"] = datetime.now(timezone.utc)
 
     if len(updates) > 1:
