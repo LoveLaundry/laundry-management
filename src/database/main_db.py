@@ -25,6 +25,7 @@ HOLIDAYS = "holidays"
 EXTRA_WORK_CATEGORIES = "extra_work_categories"
 EXTRA_WORK_RECORDS = "extra_work_records"
 COMPANY_SETTINGS = "company_settings"
+ELECTRICITY_METER_READINGS = "electricity_meter_readings"
 EXPENSE_CATEGORIES = "expense_categories"
 EXPENSES = "expenses"
 EXPENSE_TEMPLATES = "expense_templates"
@@ -103,6 +104,10 @@ def extra_work_records_collection() -> AsyncIOMotorCollection:
 
 def company_settings_collection() -> AsyncIOMotorCollection:
     return _db()[COMPANY_SETTINGS]
+
+
+def electricity_meter_readings_collection() -> AsyncIOMotorCollection:
+    return _db()[ELECTRICITY_METER_READINGS]
 
 
 def expense_categories_collection() -> AsyncIOMotorCollection:
@@ -191,6 +196,9 @@ async def ensure_indexes() -> None:
     await extra_work_records_collection().create_index([("employee_id", 1), ("date", 1)], background=True)
 
     await company_settings_collection().create_index("key", background=True)
+    await electricity_meter_readings_collection().create_index(
+        [("meter_id", 1), ("recorded_at", -1)], background=True
+    )
 
     await expense_categories_collection().create_index("name_search", background=True)
 

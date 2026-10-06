@@ -1,8 +1,8 @@
-from datetime import date as date_cls
-from typing import Any, Dict, List, Optional
+from datetime import date as date_cls, datetime, timedelta
+from typing import Any, Dict, List, Literal, Optional
 
 from bson import ObjectId
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class PyObjectId(ObjectId):
@@ -499,6 +499,21 @@ class CompanySettingsUpdate(BaseModel):
     working_days_pattern: Optional[List[int]] = None
     default_overtime_rate: Optional[float] = None
     salary_basis_days: Optional[int] = None
+    electricity_meter_1_name: Optional[str] = Field(default=None, max_length=60)
+    electricity_meter_2_name: Optional[str] = Field(default=None, max_length=60)
+
+
+class ElectricityMeterReadingCreate(BaseModel):
+    meter_id: Literal["meter_1", "meter_2"]
+    reading_value: float = Field(ge=0, allow_inf_nan=False)
+    recorded_at: datetime
+
+    @field_validator("recorded_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(hours=5, minutes=30):
+            raise ValueError("Reading date and time must use the Sri Lanka timezone (+05:30)")
+        return value
 
 
 # ---------------- Expenses ----------------
@@ -558,4 +573,3 @@ class BulkImportCreate(BaseModel):
     error_rows: int = 0
     errors: List[Dict[str, Any]] = Field(default_factory=list)
     notes: Optional[str] = None
-
