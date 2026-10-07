@@ -19,8 +19,8 @@ DEFAULT_SETTINGS = {
     "working_days_pattern": [0, 1, 2, 3, 4, 5],
     "default_overtime_rate": 0,
     "salary_basis_days": 30,
-    "electricity_meter_1_name": "Meter 1",
-    "electricity_meter_2_name": "Meter 2",
+    "electricity_meter_1_name": "Chilaw Connection Line",
+    "electricity_meter_2_name": "Madampe Connection Line",
 }
 
 
