@@ -79,9 +79,13 @@ def _new_month_summary(month: str) -> dict:
         "meter_2_previous": 0.0,
         "meter_2_units": 0.0,
         "has_interval": False,
+        "meter_1_has_interval": False,
+        "meter_2_has_interval": False,
         "errors": [],
         "warnings": [],
         "amount_lkr": None,
+        "meter_1_amount_lkr": None,
+        "meter_2_amount_lkr": None,
     }
 
 
@@ -245,6 +249,8 @@ async def electricity_meter_analytics(
                 else:
                     summary[units_key] += delta
                 summary["has_interval"] = True
+                if delta >= 0:
+                    summary[f"{meter_id}_has_interval"] = True
 
             previous_doc = doc
 
@@ -280,6 +286,30 @@ async def electricity_meter_analytics(
                 )
             except ElectricityFormulaError as exc:
                 summary["errors"].append(str(exc))
+
+        if not configuration_error:
+            for meter_id in ("meter_1", "meter_2"):
+                if not summary[f"{meter_id}_has_interval"]:
+                    continue
+                meter_variables = {
+                    "meter_1_current": summary["meter_1_current"] if meter_id == "meter_1" else 0.0,
+                    "meter_1_previous": summary["meter_1_previous"] if meter_id == "meter_1" else 0.0,
+                    "meter_1_units": summary["meter_1_units"] if meter_id == "meter_1" else 0.0,
+                    "meter_2_current": summary["meter_2_current"] if meter_id == "meter_2" else 0.0,
+                    "meter_2_previous": summary["meter_2_previous"] if meter_id == "meter_2" else 0.0,
+                    "meter_2_units": summary["meter_2_units"] if meter_id == "meter_2" else 0.0,
+                    "unit_rate_lkr": unit_rate or 0.0,
+                    "fixed_charge_lkr": 0.0,
+                    "tax_rate": 0.0,
+                }
+                try:
+                    summary[f"{meter_id}_amount_lkr"] = round(
+                        evaluate_electricity_formula(formula, meter_variables), 2
+                    )
+                except ElectricityFormulaError as exc:
+                    summary["errors"].append(
+                        f"{settings.get(f'electricity_{meter_id}_name', meter_id)}: {exc}"
+                    )
 
         summary["total_units"] = round(
             summary["meter_1_units"] + summary["meter_2_units"], 3
