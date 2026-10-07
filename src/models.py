@@ -501,6 +501,10 @@ class CompanySettingsUpdate(BaseModel):
     salary_basis_days: Optional[int] = None
     electricity_meter_1_name: Optional[str] = Field(default=None, max_length=60)
     electricity_meter_2_name: Optional[str] = Field(default=None, max_length=60)
+    electricity_cost_formula: Optional[str] = Field(default=None, max_length=300)
+    electricity_unit_rate_lkr: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    electricity_fixed_charge_lkr: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    electricity_tax_rate: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
 
 
 class ElectricityMeterReadingCreate(BaseModel):
