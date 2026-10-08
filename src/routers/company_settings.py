@@ -16,6 +16,7 @@ from ..services.electricity_formula import (
     evaluate_electricity_formula,
     validate_electricity_formula,
 )
+from ..services.meter_usage import compute_meter_usage
 
 router = APIRouter(tags=["Company Settings"])
 SRI_LANKA_TIME = timezone(timedelta(hours=5, minutes=30), name="Asia/Colombo")
@@ -339,6 +340,22 @@ async def electricity_meter_analytics(
         "months": [grouped[month] for month in month_keys],
         "readings": chart_readings,
     }
+
+
+@router.get("/company-settings/electricity-meter-usage")
+async def electricity_meter_usage(
+    current_user: dict = Depends(require_capability("employee:read")),
+):
+    settings = await company_settings_collection().find_one({"key": "main"}) or {}
+    names = {
+        "meter_1": settings.get("electricity_meter_1_name") or "Meter 1",
+        "meter_2": settings.get("electricity_meter_2_name") or "Meter 2",
+    }
+    cursor = electricity_meter_readings_collection().find({}).sort(
+        [("meter_id", 1), ("recorded_at", 1)]
+    )
+    readings = [doc async for doc in cursor]
+    return compute_meter_usage(readings, names)
 
 
 @router.post(
