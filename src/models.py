@@ -520,6 +520,19 @@ class ElectricityMeterReadingCreate(BaseModel):
         return value
 
 
+class ElectricityMeterReadingUpdate(BaseModel):
+    reading_value: float = Field(ge=0, allow_inf_nan=False)
+    reason: str = Field(min_length=1, max_length=300)
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("A correction reason is required")
+        return value
+
+
 # ---------------- Expenses ----------------
 class ExpenseCategoryCreate(BaseModel):
     name: str

@@ -7,8 +7,8 @@ from ..database.main_db import (
     company_settings_collection,
     electricity_meter_readings_collection,
 )
-from ..models import CompanySettingsUpdate, ElectricityMeterReadingCreate
-from ..router_utils import serialize, log_audit
+from ..models import CompanySettingsUpdate, ElectricityMeterReadingCreate, ElectricityMeterReadingUpdate
+from ..router_utils import serialize, log_audit, parse_object_id
 from ..services.electricity_formula import (
     DEFAULT_ELECTRICITY_COST_FORMULA,
     ElectricityFormulaError,
@@ -49,6 +49,23 @@ def _meter_reading_response(doc: dict) -> dict:
     recorded_at = doc["recorded_at"]
     if recorded_at.tzinfo is None:
         recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    corrections = []
+    for c in doc.get("corrections") or []:
+        corrected_at = c.get("corrected_at")
+        if isinstance(corrected_at, datetime):
+            if corrected_at.tzinfo is None:
+                corrected_at = corrected_at.replace(tzinfo=timezone.utc)
+            corrected_at = corrected_at.astimezone(SRI_LANKA_TIME)
+        corrections.append(
+            {
+                "old_value": c.get("old_value"),
+                "new_value": c.get("new_value"),
+                "reason": c.get("reason"),
+                "corrected_by": c.get("corrected_by"),
+                "corrected_at": corrected_at,
+            }
+        )
+    last = corrections[-1] if corrections else None
     return {
         "id": str(doc["_id"]),
         "meter_id": doc["meter_id"],
@@ -56,6 +73,8 @@ def _meter_reading_response(doc: dict) -> dict:
         "reading_value": doc["reading_value"],
         "recorded_at": recorded_at.astimezone(SRI_LANKA_TIME),
         "created_by": doc.get("created_by"),
+        "correction_reason": last.get("reason") if last else None,
+        "corrections": corrections,
     }
 
 
@@ -399,3 +418,66 @@ async def create_electricity_meter_reading(
         },
     )
     return _meter_reading_response(doc)
+
+
+@router.put("/company-settings/electricity-meter-readings/{reading_id}")
+async def update_electricity_meter_reading(
+    reading_id: str,
+    payload: ElectricityMeterReadingUpdate,
+    current_user: dict = Depends(require_capability("employee:write")),
+):
+    if str(current_user.get("role", "")).upper() != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin can correct electricity meter readings.",
+        )
+
+    oid = parse_object_id(reading_id, "meter reading")
+    doc = await electricity_meter_readings_collection().find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Electricity meter reading not found.",
+        )
+
+    old_value = float(doc["reading_value"])
+    if old_value == payload.reading_value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The reading value has not changed.",
+        )
+
+    now = datetime.now(timezone.utc)
+    new_correction = {
+        "old_value": old_value,
+        "new_value": payload.reading_value,
+        "reason": payload.reason,
+        "corrected_by": str(current_user.get("user_id", "")),
+        "corrected_at": now,
+    }
+    await electricity_meter_readings_collection().update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "reading_value": payload.reading_value,
+                "updated_at": now,
+                "last_correction": new_correction,
+            },
+            "$push": {"corrections": new_correction},
+        },
+    )
+    await log_audit(
+        str(current_user.get("user_id", "")),
+        "update",
+        "electricity_meter_reading",
+        str(oid),
+        details={
+            "meter_id": doc["meter_id"],
+            "meter_name": doc["meter_name"],
+            "old_value": old_value,
+            "new_value": payload.reading_value,
+            "reason": payload.reason,
+        },
+    )
+    updated = await electricity_meter_readings_collection().find_one({"_id": oid})
+    return _meter_reading_response(updated)
