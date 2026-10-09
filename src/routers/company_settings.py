@@ -9,12 +9,10 @@ from ..database.main_db import (
 )
 from ..models import CompanySettingsUpdate, ElectricityMeterReadingCreate, ElectricityMeterReadingUpdate
 from ..router_utils import serialize, log_audit, parse_object_id
-from ..services.electricity_formula import (
-    DEFAULT_ELECTRICITY_COST_FORMULA,
-    ElectricityFormulaError,
-    electricity_formula_variables,
-    evaluate_electricity_formula,
-    validate_electricity_formula,
+from ..services.electricity_slabs import (
+    ElectricitySlabError,
+    calculate_slab_cost,
+    normalize_unit_slabs,
 )
 from ..services.meter_usage import compute_meter_usage
 
@@ -29,18 +27,14 @@ DEFAULT_SETTINGS = {
     "salary_basis_days": 30,
     "electricity_meter_1_name": "Chilaw Connection Line",
     "electricity_meter_2_name": "Madampe Connection Line",
-    "electricity_cost_formula": DEFAULT_ELECTRICITY_COST_FORMULA,
-    "electricity_unit_rate_lkr": None,
-    "electricity_fixed_charge_lkr": 0.0,
+    "electricity_unit_slabs": [],
     "electricity_tax_rate": 0.0,
 }
 
 ADMIN_ELECTRICITY_SETTINGS = {
     "electricity_meter_1_name",
     "electricity_meter_2_name",
-    "electricity_cost_formula",
-    "electricity_unit_rate_lkr",
-    "electricity_fixed_charge_lkr",
+    "electricity_unit_slabs",
     "electricity_tax_rate",
 }
 
@@ -106,6 +100,8 @@ def _new_month_summary(month: str) -> dict:
         "amount_lkr": None,
         "meter_1_amount_lkr": None,
         "meter_2_amount_lkr": None,
+        "meter_1_cost": None,
+        "meter_2_cost": None,
     }
 
 
@@ -131,24 +127,22 @@ async def update_settings(
     if ADMIN_ELECTRICITY_SETTINGS & fields_set and str(current_user.get("role", "")).upper() != "ADMIN":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only an admin can configure electricity meters and their cost formula.",
+            detail="Only an admin can configure electricity meters and their tariff slabs.",
         )
 
     existing = await company_settings_collection().find_one({"key": "main"})
     updates = payload.model_dump(exclude_none=True)
     unset_fields = {}
-    if "electricity_unit_rate_lkr" in fields_set and payload.electricity_unit_rate_lkr is None:
-        unset_fields["electricity_unit_rate_lkr"] = ""
-    if "electricity_cost_formula" in updates:
+    if "electricity_unit_slabs" in updates and payload.electricity_unit_slabs is not None:
+        slab_dicts = [slab.model_dump() for slab in payload.electricity_unit_slabs]
         try:
-            updates["electricity_cost_formula"] = validate_electricity_formula(
-                updates["electricity_cost_formula"]
-            )
-        except ElectricityFormulaError as exc:
+            normalize_unit_slabs(slab_dicts)
+        except ElectricitySlabError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
+        updates["electricity_unit_slabs"] = slab_dicts
 
     for field in ("electricity_meter_1_name", "electricity_meter_2_name"):
         if field in updates:
@@ -202,23 +196,14 @@ async def electricity_meter_analytics(
     current_user: dict = Depends(require_capability("employee:read")),
 ):
     settings = await company_settings_collection().find_one({"key": "main"}) or {}
-    formula = settings.get(
-        "electricity_cost_formula", DEFAULT_ELECTRICITY_COST_FORMULA
-    )
-    configured_unit_rate = settings.get("electricity_unit_rate_lkr")
-    unit_rate = (
-        float(configured_unit_rate) if configured_unit_rate is not None else None
-    )
-    fixed_charge = float(settings.get("electricity_fixed_charge_lkr", 0) or 0)
+    slabs_raw = settings.get("electricity_unit_slabs") or []
     tax_rate = float(settings.get("electricity_tax_rate", 0) or 0)
     configuration_error = None
     try:
-        formula_variables = electricity_formula_variables(formula)
-    except ElectricityFormulaError as exc:
-        formula_variables = frozenset()
+        slabs = normalize_unit_slabs(slabs_raw)
+    except ElectricitySlabError as exc:
+        slabs = []
         configuration_error = str(exc)
-    if "unit_rate_lkr" in formula_variables and unit_rate is None:
-        configuration_error = "Set the electricity unit rate before calculating LKR amounts."
 
     cursor = electricity_meter_readings_collection().find({}).sort(
         [("meter_id", 1), ("recorded_at", 1)]
@@ -289,47 +274,15 @@ async def electricity_meter_analytics(
         if configuration_error:
             summary["errors"].append(configuration_error)
         elif summary["has_interval"] and not summary["errors"]:
-            variables = {
-                "meter_1_current": summary["meter_1_current"],
-                "meter_1_previous": summary["meter_1_previous"],
-                "meter_1_units": summary["meter_1_units"],
-                "meter_2_current": summary["meter_2_current"],
-                "meter_2_previous": summary["meter_2_previous"],
-                "meter_2_units": summary["meter_2_units"],
-                "unit_rate_lkr": unit_rate or 0.0,
-                "fixed_charge_lkr": fixed_charge,
-                "tax_rate": tax_rate,
-            }
-            try:
-                summary["amount_lkr"] = round(
-                    evaluate_electricity_formula(formula, variables), 2
-                )
-            except ElectricityFormulaError as exc:
-                summary["errors"].append(str(exc))
-
-        if not configuration_error:
+            meter_amounts = []
             for meter_id in ("meter_1", "meter_2"):
                 if not summary[f"{meter_id}_has_interval"]:
                     continue
-                meter_variables = {
-                    "meter_1_current": summary["meter_1_current"] if meter_id == "meter_1" else 0.0,
-                    "meter_1_previous": summary["meter_1_previous"] if meter_id == "meter_1" else 0.0,
-                    "meter_1_units": summary["meter_1_units"] if meter_id == "meter_1" else 0.0,
-                    "meter_2_current": summary["meter_2_current"] if meter_id == "meter_2" else 0.0,
-                    "meter_2_previous": summary["meter_2_previous"] if meter_id == "meter_2" else 0.0,
-                    "meter_2_units": summary["meter_2_units"] if meter_id == "meter_2" else 0.0,
-                    "unit_rate_lkr": unit_rate or 0.0,
-                    "fixed_charge_lkr": 0.0,
-                    "tax_rate": 0.0,
-                }
-                try:
-                    summary[f"{meter_id}_amount_lkr"] = round(
-                        evaluate_electricity_formula(formula, meter_variables), 2
-                    )
-                except ElectricityFormulaError as exc:
-                    summary["errors"].append(
-                        f"{settings.get(f'electricity_{meter_id}_name', meter_id)}: {exc}"
-                    )
+                cost = calculate_slab_cost(summary[f"{meter_id}_units"], slabs, tax_rate)
+                summary[f"{meter_id}_cost"] = cost
+                summary[f"{meter_id}_amount_lkr"] = cost["amount_lkr"]
+                meter_amounts.append(cost["amount_lkr"])
+            summary["amount_lkr"] = round(sum(meter_amounts), 2) if meter_amounts else None
 
         summary["total_units"] = round(
             summary["meter_1_units"] + summary["meter_2_units"], 3
@@ -351,9 +304,7 @@ async def electricity_meter_analytics(
     chart_readings.sort(key=lambda reading: reading["recorded_at"])
 
     return {
-        "formula": formula,
-        "unit_rate_lkr": unit_rate,
-        "fixed_charge_lkr": fixed_charge,
+        "unit_slabs": slabs,
         "tax_rate": tax_rate,
         "configuration_error": configuration_error,
         "months": [grouped[month] for month in month_keys],

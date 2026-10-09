@@ -493,6 +493,12 @@ class SalarySlipUpdate(BaseModel):
 
 
 # ---------------- Company Settings ----------------
+class ElectricityUnitSlab(BaseModel):
+    up_to: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    rate_lkr: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    fixed_charge_lkr: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+
+
 class CompanySettingsUpdate(BaseModel):
     company_name: Optional[str] = None
     working_days_per_week: Optional[int] = None
@@ -501,9 +507,7 @@ class CompanySettingsUpdate(BaseModel):
     salary_basis_days: Optional[int] = None
     electricity_meter_1_name: Optional[str] = Field(default=None, max_length=60)
     electricity_meter_2_name: Optional[str] = Field(default=None, max_length=60)
-    electricity_cost_formula: Optional[str] = Field(default=None, max_length=300)
-    electricity_unit_rate_lkr: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
-    electricity_fixed_charge_lkr: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    electricity_unit_slabs: Optional[List[ElectricityUnitSlab]] = None
     electricity_tax_rate: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
 
 
