@@ -510,6 +510,8 @@ class CompanySettingsUpdate(BaseModel):
     electricity_unit_slabs: Optional[List[ElectricityUnitSlab]] = None
     electricity_tax_rate: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     electricity_billing_cycle_start_day: Optional[int] = Field(default=None, ge=1, le=28)
+    electricity_projection_method: Optional[str] = None
+    electricity_projection_formula: Optional[str] = Field(default=None, max_length=300)
 
 
 class ElectricityMeterReadingCreate(BaseModel):

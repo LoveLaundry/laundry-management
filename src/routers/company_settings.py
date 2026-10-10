@@ -21,6 +21,12 @@ from ..services.electricity_projection import (
     parse_day,
     period_bounds,
 )
+from ..services.projection_methods import (
+    DEFAULT_METHOD,
+    METHOD_IDS,
+    ProjectionMethodError,
+    validate_projection_formula,
+)
 from ..services.meter_usage import compute_meter_usage
 
 router = APIRouter(tags=["Company Settings"])
@@ -37,6 +43,8 @@ DEFAULT_SETTINGS = {
     "electricity_unit_slabs": [],
     "electricity_tax_rate": 0.0,
     "electricity_billing_cycle_start_day": 1,
+    "electricity_projection_method": DEFAULT_METHOD,
+    "electricity_projection_formula": None,
 }
 
 ADMIN_ELECTRICITY_SETTINGS = {
@@ -45,6 +53,8 @@ ADMIN_ELECTRICITY_SETTINGS = {
     "electricity_unit_slabs",
     "electricity_tax_rate",
     "electricity_billing_cycle_start_day",
+    "electricity_projection_method",
+    "electricity_projection_formula",
 }
 
 
@@ -155,6 +165,36 @@ async def update_settings(
                 detail=str(exc),
             ) from exc
         updates["electricity_unit_slabs"] = slab_dicts
+    if "electricity_projection_method" in updates:
+        if updates["electricity_projection_method"] not in METHOD_IDS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown projection method: {updates['electricity_projection_method']}.",
+            )
+        if updates["electricity_projection_method"] == "custom":
+            candidate = (payload.electricity_projection_formula or "").strip()
+            if not candidate:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Set a custom projection formula before using the custom method.",
+                )
+            try:
+                updates["electricity_projection_formula"] = validate_projection_formula(candidate)
+            except ProjectionMethodError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=str(exc),
+                ) from exc
+    elif "electricity_projection_formula" in updates and payload.electricity_projection_formula:
+        try:
+            updates["electricity_projection_formula"] = validate_projection_formula(
+                payload.electricity_projection_formula
+            )
+        except ProjectionMethodError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
 
     for field in ("electricity_meter_1_name", "electricity_meter_2_name"):
         if field in updates:
@@ -348,6 +388,8 @@ async def electricity_meter_usage(
 async def electricity_meter_projection(
     start: str | None = Query(default=None, description="Window start as YYYY-MM-DD (LKT)"),
     end: str | None = Query(default=None, description="Window end as YYYY-MM-DD (LKT)"),
+    method: str | None = Query(default=None, description="Projection method id; defaults to the saved method"),
+    formula: str | None = Query(default=None, description="Custom pace formula preview (custom method only)"),
     current_user: dict = Depends(require_capability("employee:read")),
 ):
     settings = await company_settings_collection().find_one({"key": "main"}) or {}
@@ -358,6 +400,9 @@ async def electricity_meter_projection(
     slabs_raw = settings.get("electricity_unit_slabs") or []
     tax_rate = float(settings.get("electricity_tax_rate", 0) or 0)
     start_day = clamp_start_day(settings.get("electricity_billing_cycle_start_day", 1))
+    saved_method = settings.get("electricity_projection_method") or DEFAULT_METHOD
+    effective_method = method or saved_method
+    effective_formula = formula if formula is not None else settings.get("electricity_projection_formula")
     configuration_error = None
     try:
         slabs = normalize_unit_slabs(slabs_raw)
@@ -387,6 +432,7 @@ async def electricity_meter_projection(
         projection = compute_projection(
             readings, names, slabs or None, tax_rate,
             start_day, window_start, window_end, today,
+            effective_method, effective_formula,
         )
     except ElectricityProjectionError as exc:
         raise HTTPException(

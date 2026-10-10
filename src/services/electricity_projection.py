@@ -14,6 +14,22 @@ from datetime import date, timedelta
 
 from .electricity_slabs import calculate_slab_cost
 from .meter_usage import METERS, compute_meter_usage
+from .projection_methods import (
+    DEFAULT_METHOD,
+    METHODS,
+    METHOD_IDS,
+    ProjectionMethodError,
+    evaluate_projection_formula,
+    method_label,
+    pace_best_week,
+    pace_exp_smoothing,
+    pace_last_period,
+    pace_low_week,
+    pace_median,
+    pace_trailing,
+    pace_weighted_recent,
+    validate_projection_formula,
+)
 
 MAX_RANGE_DAYS = 366
 
@@ -91,9 +107,25 @@ def compute_projection(
     start: date | None,
     end: date | None,
     today: date,
+    method: str | None = None,
+    formula: str | None = None,
 ) -> dict:
     """Project a billing window's month-end consumption and slab cost."""
     start_day = clamp_start_day(start_day)
+    method = method or DEFAULT_METHOD
+    if method not in METHOD_IDS:
+        raise ElectricityProjectionError(
+            f"Unknown projection method: {method}."
+        )
+    if method == "custom":
+        if not (formula or "").strip():
+            raise ElectricityProjectionError(
+                "Set a custom projection formula before using the custom method."
+            )
+        try:
+            formula = validate_projection_formula(formula)
+        except ProjectionMethodError as exc:
+            raise ElectricityProjectionError(str(exc)) from exc
     if start is None or end is None:
         start, end = period_bounds(today, start_day)
     if start > end:
@@ -127,27 +159,70 @@ def compute_projection(
         units_so_far = sum(daily)
         run_rate = units_so_far / measured_days if measured_days else 0.0
         fit = _fit_trend(daily)
-        if fit is None:
-            method = "run_rate"
-            trend = None
-            slope = None
-            intercept = None
-            forecast_days = [round(run_rate, 3)] * remaining_days
-        else:
+        slope = intercept = None
+        trend = None
+        if fit is not None:
             slope, intercept, r_squared, direction = fit
-            method = "trend"
             trend = {
                 "kwh_per_day": round(slope, 3),
                 "r_squared": round(r_squared, 3),
                 "direction": direction,
             }
-            forecast_days = [
-                round(max(0.0, intercept + slope * (measured_days + ahead)), 3)
-                for ahead in range(remaining_days)
-            ]
+        method_note = None
+        if method == "linear_trend":
+            if fit is None:
+                forecast_days = [round(run_rate, 3)] * remaining_days
+            else:
+                forecast_days = [
+                    round(max(0.0, intercept + slope * (measured_days + ahead)), 3)
+                    for ahead in range(remaining_days)
+                ]
+        else:
+            if method == "period_average":
+                pace = run_rate
+            elif method == "trailing_7d":
+                pace = pace_trailing(daily, 7)
+            elif method == "trailing_14d":
+                pace = pace_trailing(daily, 14)
+            elif method == "weighted_recent":
+                pace = pace_weighted_recent(daily)
+            elif method == "median":
+                pace = pace_median(daily)
+            elif method == "exp_smoothing":
+                pace = pace_exp_smoothing(daily)
+            elif method == "best_week":
+                pace = pace_best_week(daily)
+            elif method == "low_week":
+                pace = pace_low_week(daily)
+            elif method == "last_period":
+                pace = pace_last_period(by_date, meter_id, start, total_days, readings)
+                if pace is None:
+                    pace = run_rate
+                    method_note = "Previous period had no readings — used the period average instead."
+            elif method == "custom":
+                variables = {
+                    "units_so_far": round(units_so_far, 3),
+                    "measured_days": measured_days,
+                    "remaining_days": remaining_days,
+                    "total_days": total_days,
+                    "avg_daily": round(run_rate, 3),
+                    "avg_7d": round(pace_trailing(daily, 7), 3),
+                    "avg_14d": round(pace_trailing(daily, 14), 3),
+                    "median_daily": round(pace_median(daily), 3),
+                    "trend_slope": round(slope, 3) if slope is not None else 0.0,
+                    "trend_intercept": round(intercept, 3) if intercept is not None else 0.0,
+                    "last_daily": round(daily[-1], 3) if daily else 0.0,
+                }
+                try:
+                    pace = evaluate_projection_formula(formula, variables)
+                except ProjectionMethodError as exc:
+                    raise ElectricityProjectionError(str(exc)) from exc
+            forecast_days = [round(pace, 3)] * remaining_days
         forecast = sum(forecast_days)
         projected_units = units_so_far + forecast
         projected_run_rate_units = units_so_far + run_rate * remaining_days
+        if method == "linear_trend":
+            pace = round(forecast / remaining_days, 3) if remaining_days else round(run_rate, 3)
         series = []
         for offset in range(total_days):
             day_iso = (start + timedelta(days=offset)).isoformat()
@@ -178,6 +253,9 @@ def compute_projection(
             "units_so_far": round(units_so_far, 3),
             "run_rate_kwh_per_day": _round2(run_rate),
             "method": method,
+            "method_label": method_label(method),
+            "pace_kwh_per_day": _round2(pace),
+            "method_note": method_note,
             "trend": trend,
             "projected_units": round(projected_units, 3),
             "projected_units_run_rate": round(projected_run_rate_units, 3),
@@ -224,6 +302,9 @@ def compute_projection(
         "remaining_days": remaining_days,
         "is_current": start <= today <= end,
         "has_data": elapsed_days > 0 and any(m["units_so_far"] > 0 for m in meters.values()),
+        "method": method,
+        "method_label": method_label(method),
+        "methods": METHODS,
         "meters": meters,
         "combined": {
             "units_so_far": _sum("units_so_far"),
