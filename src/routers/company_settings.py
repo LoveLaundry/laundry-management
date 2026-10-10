@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -13,6 +13,13 @@ from ..services.electricity_slabs import (
     ElectricitySlabError,
     calculate_slab_cost,
     normalize_unit_slabs,
+)
+from ..services.electricity_projection import (
+    ElectricityProjectionError,
+    clamp_start_day,
+    compute_projection,
+    parse_day,
+    period_bounds,
 )
 from ..services.meter_usage import compute_meter_usage
 
@@ -29,6 +36,7 @@ DEFAULT_SETTINGS = {
     "electricity_meter_2_name": "Madampe Connection Line",
     "electricity_unit_slabs": [],
     "electricity_tax_rate": 0.0,
+    "electricity_billing_cycle_start_day": 1,
 }
 
 ADMIN_ELECTRICITY_SETTINGS = {
@@ -36,6 +44,7 @@ ADMIN_ELECTRICITY_SETTINGS = {
     "electricity_meter_2_name",
     "electricity_unit_slabs",
     "electricity_tax_rate",
+    "electricity_billing_cycle_start_day",
 }
 
 
@@ -79,13 +88,16 @@ def _recorded_at_utc(doc: dict) -> datetime:
     return recorded_at.astimezone(timezone.utc)
 
 
-def _lkt_month(doc: dict) -> str:
-    return _recorded_at_utc(doc).astimezone(SRI_LANKA_TIME).strftime("%Y-%m")
+def _period_id(doc: dict, start_day: int) -> str:
+    day = _recorded_at_utc(doc).astimezone(SRI_LANKA_TIME).date()
+    return period_bounds(day, start_day)[0].isoformat()
 
 
-def _new_month_summary(month: str) -> dict:
+def _new_month_summary(period_start: str, period_end: str) -> dict:
     return {
-        "month": month,
+        "month": period_start,
+        "period_start": period_start,
+        "period_end": period_end,
         "meter_1_current": 0.0,
         "meter_1_previous": 0.0,
         "meter_1_units": 0.0,
@@ -198,6 +210,7 @@ async def electricity_meter_analytics(
     settings = await company_settings_collection().find_one({"key": "main"}) or {}
     slabs_raw = settings.get("electricity_unit_slabs") or []
     tax_rate = float(settings.get("electricity_tax_rate", 0) or 0)
+    start_day = clamp_start_day(settings.get("electricity_billing_cycle_start_day", 1))
     configuration_error = None
     try:
         slabs = normalize_unit_slabs(slabs_raw)
@@ -215,8 +228,10 @@ async def electricity_meter_analytics(
 
     for doc in readings:
         readings_by_meter[doc["meter_id"]].append(doc)
-        month = _lkt_month(doc)
-        grouped.setdefault(month, _new_month_summary(month))
+        month = _period_id(doc, start_day)
+        if month not in grouped:
+            bounds = period_bounds(date.fromisoformat(month), start_day)
+            grouped[month] = _new_month_summary(bounds[0].isoformat(), bounds[1].isoformat())
 
     for meter_id, docs in readings_by_meter.items():
         current_key = f"{meter_id}_current"
@@ -225,7 +240,7 @@ async def electricity_meter_analytics(
         previous_doc = None
 
         for doc in docs:
-            month = _lkt_month(doc)
+            month = _period_id(doc, start_day)
             summary = grouped[month]
             current_value = float(doc["reading_value"])
             if month not in seen_months_by_meter[meter_id]:
@@ -263,9 +278,9 @@ async def electricity_meter_analytics(
     for month in month_keys:
         summary = grouped[month]
         for meter_id, docs in readings_by_meter.items():
-            if any(_lkt_month(doc) == month for doc in docs):
+            if any(_period_id(doc, start_day) == month for doc in docs):
                 continue
-            earlier_docs = [doc for doc in docs if _lkt_month(doc) < month]
+            earlier_docs = [doc for doc in docs if _period_id(doc, start_day) < month]
             if earlier_docs:
                 latest = float(earlier_docs[-1]["reading_value"])
                 summary[f"{meter_id}_current"] = latest
@@ -306,6 +321,7 @@ async def electricity_meter_analytics(
     return {
         "unit_slabs": slabs,
         "tax_rate": tax_rate,
+        "billing_cycle_start_day": start_day,
         "configuration_error": configuration_error,
         "months": [grouped[month] for month in month_keys],
         "readings": chart_readings,
@@ -326,6 +342,59 @@ async def electricity_meter_usage(
     )
     readings = [doc async for doc in cursor]
     return compute_meter_usage(readings, names)
+
+
+@router.get("/company-settings/electricity-meter-projection")
+async def electricity_meter_projection(
+    start: str | None = Query(default=None, description="Window start as YYYY-MM-DD (LKT)"),
+    end: str | None = Query(default=None, description="Window end as YYYY-MM-DD (LKT)"),
+    current_user: dict = Depends(require_capability("employee:read")),
+):
+    settings = await company_settings_collection().find_one({"key": "main"}) or {}
+    names = {
+        "meter_1": settings.get("electricity_meter_1_name") or "Meter 1",
+        "meter_2": settings.get("electricity_meter_2_name") or "Meter 2",
+    }
+    slabs_raw = settings.get("electricity_unit_slabs") or []
+    tax_rate = float(settings.get("electricity_tax_rate", 0) or 0)
+    start_day = clamp_start_day(settings.get("electricity_billing_cycle_start_day", 1))
+    configuration_error = None
+    try:
+        slabs = normalize_unit_slabs(slabs_raw)
+    except ElectricitySlabError as exc:
+        slabs = []
+        configuration_error = str(exc)
+
+    try:
+        window_start = parse_day(start, "Start date") if start else None
+        window_end = parse_day(end, "End date") if end else None
+        if (window_start is None) != (window_end is None):
+            raise ElectricityProjectionError(
+                "Set both the start and end dates, or leave both empty for the current billing month."
+            )
+    except ElectricityProjectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    cursor = electricity_meter_readings_collection().find({}).sort(
+        [("meter_id", 1), ("recorded_at", 1)]
+    )
+    readings = [doc async for doc in cursor]
+    today = datetime.now(SRI_LANKA_TIME).date()
+    try:
+        projection = compute_projection(
+            readings, names, slabs or None, tax_rate,
+            start_day, window_start, window_end, today,
+        )
+    except ElectricityProjectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    projection["configuration_error"] = configuration_error
+    return projection
 
 
 @router.post(
