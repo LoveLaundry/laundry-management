@@ -130,7 +130,9 @@ def compute_projection(
         if fit is None:
             method = "run_rate"
             trend = None
-            forecast = run_rate * remaining_days
+            slope = None
+            intercept = None
+            forecast_days = [round(run_rate, 3)] * remaining_days
         else:
             slope, intercept, r_squared, direction = fit
             method = "trend"
@@ -139,12 +141,36 @@ def compute_projection(
                 "r_squared": round(r_squared, 3),
                 "direction": direction,
             }
-            forecast = sum(
-                max(0.0, intercept + slope * (measured_days + ahead))
+            forecast_days = [
+                round(max(0.0, intercept + slope * (measured_days + ahead)), 3)
                 for ahead in range(remaining_days)
-            )
+            ]
+        forecast = sum(forecast_days)
         projected_units = units_so_far + forecast
         projected_run_rate_units = units_so_far + run_rate * remaining_days
+        series = []
+        for offset in range(total_days):
+            day_iso = (start + timedelta(days=offset)).isoformat()
+            actual = round(daily[offset], 3) if offset < len(daily) else None
+            trend_value = (
+                round(max(0.0, intercept + slope * offset), 3)
+                if slope is not None
+                else None
+            )
+            ahead = offset - measured_days
+            forecast_value = (
+                forecast_days[ahead]
+                if remaining_days and 0 <= ahead < len(forecast_days)
+                else None
+            )
+            series.append(
+                {
+                    "date": day_iso,
+                    "actual": actual,
+                    "trend": trend_value,
+                    "forecast": forecast_value,
+                }
+            )
         latest = usage["meters"][meter_id]
         entry = {
             "meter_id": meter_id,
@@ -159,6 +185,7 @@ def compute_projection(
             "last_reading_date": latest["latest_reading_date"],
             "cost_so_far": None,
             "projected_cost": None,
+            "series": series,
         }
         if slabs:
             entry["cost_so_far"] = calculate_slab_cost(units_so_far, slabs, tax_rate)
@@ -173,6 +200,18 @@ def compute_projection(
         if not costs:
             return None
         return _round2(sum(c[amount] for c in costs))
+
+    combined_series = []
+    for offset in range(total_days):
+        row = {"date": (start + timedelta(days=offset)).isoformat()}
+        for key in ("actual", "trend", "forecast"):
+            values = [meters[meter_id]["series"][offset][key] for meter_id in METERS]
+            row[key] = (
+                round(sum(v for v in values if v is not None), 3)
+                if any(v is not None for v in values)
+                else None
+            )
+        combined_series.append(row)
 
     return {
         "period_start": start.isoformat(),
@@ -192,5 +231,6 @@ def compute_projection(
             "projected_units_run_rate": _sum("projected_units_run_rate"),
             "cost_so_far_lkr": _sum_cost("cost_so_far", "amount_lkr"),
             "projected_cost_lkr": _sum_cost("projected_cost", "amount_lkr"),
+            "series": combined_series,
         },
     }
