@@ -2,11 +2,10 @@ import calendar
 from datetime import date as date_type
 from datetime import datetime, timezone
 from datetime import timedelta
-import sys
-from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import HTTPException
+from pydantic import BaseModel, Field
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, Query
@@ -22,10 +21,11 @@ from ..database.main_db import (
     expenses_collection,
     expense_categories_collection,
     salaries_collection,
+    saved_reports_collection,
 )
 from ..crypto_helper import decrypt_dict
 from ..app_time import this_month_number, this_year, today_str
-from ..router_utils import serialize
+from ..router_utils import log_audit, serialize
 
 router = APIRouter(tags=["Reports"])
 
@@ -37,12 +37,25 @@ CAT_SENSITIVE = ["name", "description"]
 EXPENSE_SENSITIVE = ["description", "reference", "notes"]
 SALARY_SENSITIVE = ["notes"]
 
-MASTER_REVENUE_SOURCE = "gate_pass_quotation_prices"
+MASTER_FINANCIALS_SOURCE = "management_payroll_and_expenses"
 
-_BILL_SERVICE_SRC = Path(__file__).resolve().parents[3] / "bill-service" / "src"
-if str(_BILL_SERVICE_SRC) not in sys.path:
-    sys.path.insert(0, str(_BILL_SERVICE_SRC))
 
+class SavedReportCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    start_date: date_type
+    end_date: date_type
+    selected_quotations: dict[str, Optional[str]] = Field(default_factory=dict)
+    report_data: dict[str, Any]
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SavedReportUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    start_date: Optional[date_type] = None
+    end_date: Optional[date_type] = None
+    selected_quotations: Optional[dict[str, Optional[str]]] = None
+    report_data: Optional[dict[str, Any]] = None
+    notes: Optional[str] = Field(default=None, max_length=2000)
 
 def _num(value) -> float:
     try:
@@ -72,160 +85,6 @@ def _normalize_gate_pass_date(value) -> Optional[date_type]:
         except ValueError:
             return None
     return None
-
-
-async def _list_gate_passes_for_range(start_date: str, end_date: str) -> list:
-    """List gate passes in a date window using the bill-service source of truth.
-
-    The reporting engine must recognize revenue from gate passes and quotation
-    prices, not from billed totals or invoice records. If the cross-service data
-    is unavailable in this process, the requester gets an empty-income result
-    rather than a false billing-driven number.
-    """
-    try:
-        from importlib import import_module
-
-        gatepasses_collection = import_module("bill_service.database.main_db").gatepasses_collection
-    except Exception:
-        return []
-
-    try:
-        start = date_type.fromisoformat(start_date)
-        end = date_type.fromisoformat(end_date)
-    except ValueError:
-        return []
-
-    docs = []
-    try:
-        async for doc in gatepasses_collection.find({}):
-            pass_date = _normalize_gate_pass_date(doc.get("receiving_date"))
-            if pass_date is None:
-                continue
-            if start <= pass_date <= end:
-                docs.append(doc)
-    except Exception:
-        return []
-    return docs
-
-
-async def _resolve_quotation_prices(quotation_id: Optional[str]) -> dict:
-    """Return item -> {price, category} from the quotation source of truth."""
-    if not quotation_id:
-        return {}
-
-    try:
-        from importlib import import_module
-
-        get_client = import_module("bill_service.database.connection_manager").get_client
-    except Exception:
-        return {}
-
-    try:
-        q_oid = ObjectId(quotation_id)
-    except Exception:
-        return {}
-
-    motor_client = get_client("MAIN")
-    for db_name in ("quotations_db", "quotations", "laundry_db"):
-        try:
-            coll = motor_client[db_name]["quotations"]
-            quotation_doc = await coll.find_one({"_id": q_oid})
-        except Exception:
-            continue
-        if not quotation_doc:
-            continue
-        try:
-            decrypted = decrypt_dict(quotation_doc, ["client_name", "quotation_title", "line_items"])
-        except Exception:
-            decrypted = quotation_doc
-
-        prices = {}
-        for item in decrypted.get("line_items", []) or []:
-            if not isinstance(item, dict):
-                continue
-            item_name = (item.get("item_name") or "").strip()
-            if not item_name:
-                continue
-            prices[item_name] = {
-                "price": _num(item.get("unit_price") or item.get("price") or 0.0),
-                "category": item.get("category"),
-            }
-        if prices:
-            return prices
-    return {}
-
-
-def _gate_pass_summary(gate_passes: list, quotation_map: dict) -> tuple:
-    hotel_summary: dict = {}
-    item_summary: dict = {}
-    total_income = 0.0
-    total_quantity = 0.0
-    unpriced_items = 0
-
-    for gp in gate_passes:
-        try:
-            decoded = decrypt_dict(gp, ["client_name", "items", "notes"])
-        except Exception:
-            decoded = gp
-
-        client_name = (decoded.get("client_name") or "Unknown").strip() or "Unknown"
-        quote_id = decoded.get("quotation_id")
-        prices = quotation_map.get(quote_id) if quote_id else {}
-        if quote_id and not prices:
-            prices = {}
-
-        hotel_bucket = hotel_summary.setdefault(
-            client_name,
-            {"client_name": client_name, "income": 0.0, "quantity": 0.0, "gate_pass_count": 0},
-        )
-        hotel_bucket["gate_pass_count"] += 1
-
-        for item in decoded.get("items", []) or []:
-            item_name = (item.get("item_name") or "").strip()
-            qty = _num(item.get("received_qty"))
-            if not item_name:
-                continue
-            total_quantity += qty
-            price_info = prices.get(item_name) or {}
-            unit_price = _num(price_info.get("price") or price_info.get("unit_price"))
-            line_income = qty * unit_price
-            if unit_price <= 0:
-                unpriced_items += 1
-            total_income += line_income
-            hotel_bucket["income"] += line_income
-            hotel_bucket["quantity"] += qty
-
-            item_bucket = item_summary.setdefault(
-                item_name,
-                {"item_name": item_name, "income": 0.0, "quantity": 0.0, "hotel_count": set()},
-            )
-            item_bucket["income"] += line_income
-            item_bucket["quantity"] += qty
-            item_bucket["hotel_count"].add(client_name)
-
-    hotel_rows = [{
-        "client_name": v["client_name"],
-        "income": round(v["income"], 2),
-        "quantity": round(v["quantity"], 2),
-        "gate_pass_count": v["gate_pass_count"],
-    } for v in hotel_summary.values()]
-    hotel_rows.sort(key=lambda x: (-x["income"], x["client_name"]))
-
-    item_rows = [{
-        "item_name": v["item_name"],
-        "income": round(v["income"], 2),
-        "quantity": round(v["quantity"], 2),
-        "hotel_count": len(v["hotel_count"]),
-    } for v in item_summary.values()]
-    item_rows.sort(key=lambda x: (-x["income"], x["item_name"]))
-
-    return {
-        "total_income": round(total_income, 2),
-        "total_quantity": round(total_quantity, 2),
-        "unpriced_items": unpriced_items,
-        "hotel_summary": hotel_rows,
-        "item_summary": item_rows,
-    }, item_rows
 
 
 def _prorate_monthly_salary(calculation: dict, month_days: int, covered_days: int) -> dict:
@@ -393,14 +252,6 @@ async def _salary_expense_summary(start: date_type, end: date_type) -> dict:
 
 
 async def _master_report_data(start_date: str, end_date: str) -> dict:
-    gate_passes = await _list_gate_passes_for_range(start_date, end_date)
-    quotation_cache = {}
-    for gp in gate_passes:
-        quote_id = (gp.get("quotation_id") or "").strip()
-        if quote_id and quote_id not in quotation_cache:
-            quotation_cache[quote_id] = await _resolve_quotation_prices(quote_id)
-
-    summary, _ = _gate_pass_summary(gate_passes, quotation_cache)
     expenses = await _dec_expenses({"date": {"$gte": start_date, "$lte": end_date}})
     other_expenses = round(sum(_num(e.get("amount")) for e in expenses), 2)
     payroll = await _salary_expense_summary(
@@ -408,18 +259,17 @@ async def _master_report_data(start_date: str, end_date: str) -> dict:
         date_type.fromisoformat(end_date),
     )
     total_expenses = round(other_expenses + payroll["salary_expense_total"], 2)
-    summary["source_of_truth"] = MASTER_REVENUE_SOURCE
-    summary["other_expense_total"] = other_expenses
-    summary["salary_expense_total"] = payroll["salary_expense_total"]
-    summary["expense_total"] = total_expenses
-    summary["total_expenses"] = total_expenses
-    summary["net_profit"] = round(summary["total_income"] - total_expenses, 2)
-    summary["salary_expenses"] = payroll["employees"]
-    summary["salary_period_details"] = payroll["period_details"]
-    summary["other_expense_details"] = expenses
-    summary["start_date"] = start_date
-    summary["end_date"] = end_date
-    return summary
+    return {
+        "source_of_truth": MASTER_FINANCIALS_SOURCE,
+        "other_expense_total": other_expenses,
+        "salary_expense_total": payroll["salary_expense_total"],
+        "total_expenses": total_expenses,
+        "salary_expenses": payroll["employees"],
+        "salary_period_details": payroll["period_details"],
+        "other_expense_details": expenses,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
 
 
 async def _dec_transactions(query: dict) -> list:
@@ -746,6 +596,122 @@ async def item_wise_report(
 
     payload = await _master_report_data(start_date, end_date)
     return payload["item_summary"]
+
+
+def _serialize_saved_report(doc: dict) -> dict:
+    result = dict(doc)
+    result["id"] = str(result.pop("_id"))
+    return result
+
+
+@router.get("/reports/saved")
+async def list_saved_reports(
+    current_user: dict = Depends(require_capability("report:read")),
+):
+    cursor = saved_reports_collection().find({}).sort("updated_at", -1).limit(100)
+    return [_serialize_saved_report(doc) async for doc in cursor]
+
+
+@router.post("/reports/saved")
+async def create_saved_report(
+    payload: SavedReportCreate,
+    current_user: dict = Depends(require_capability("report:write")),
+):
+    if payload.end_date < payload.start_date:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date.")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Report title cannot be blank.")
+
+    now = datetime.now(timezone.utc)
+    doc = {
+        "title": title,
+        "start_date": payload.start_date.isoformat(),
+        "end_date": payload.end_date.isoformat(),
+        "selected_quotations": payload.selected_quotations,
+        "report_data": payload.report_data,
+        "notes": (payload.notes or "").strip() or None,
+        "created_by": str(current_user.get("user_id") or current_user.get("user_name") or ""),
+        "created_at": now,
+        "updated_by": str(current_user.get("user_id") or current_user.get("user_name") or ""),
+        "updated_at": now,
+    }
+    result = await saved_reports_collection().insert_one(doc)
+    doc["_id"] = result.inserted_id
+    await log_audit(
+        str(current_user.get("user_id", "")),
+        "create",
+        "saved_report",
+        str(result.inserted_id),
+        details={"title": title, "start_date": doc["start_date"], "end_date": doc["end_date"]},
+    )
+    return _serialize_saved_report(doc)
+
+
+@router.put("/reports/saved/{report_id}")
+async def update_saved_report(
+    report_id: str,
+    payload: SavedReportUpdate,
+    current_user: dict = Depends(require_capability("report:write")),
+):
+    if not ObjectId.is_valid(report_id):
+        raise HTTPException(status_code=404, detail="Saved report not found.")
+    oid = ObjectId(report_id)
+    existing = await saved_reports_collection().find_one({"_id": oid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Saved report not found.")
+
+    updates = payload.model_dump(exclude_unset=True)
+    for key in ("title", "start_date", "end_date"):
+        if key in updates and updates[key] is None:
+            updates.pop(key)
+    if "title" in updates:
+        updates["title"] = updates["title"].strip()
+        if not updates["title"]:
+            raise HTTPException(status_code=400, detail="Report title cannot be blank.")
+    for key in ("start_date", "end_date"):
+        if key in updates and updates[key] is not None:
+            updates[key] = updates[key].isoformat()
+
+    start = date_type.fromisoformat(updates.get("start_date", existing["start_date"]))
+    end = date_type.fromisoformat(updates.get("end_date", existing["end_date"]))
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date.")
+    criteria_changed = any(key in updates for key in ("start_date", "end_date", "selected_quotations"))
+    if criteria_changed and "report_data" not in updates:
+        raise HTTPException(
+            status_code=400,
+            detail="Regenerate the report and include report_data when changing its date or quotation criteria.",
+        )
+    if "notes" in updates:
+        updates["notes"] = (updates["notes"] or "").strip() or None
+
+    updates["updated_by"] = str(current_user.get("user_id") or current_user.get("user_name") or "")
+    updates["updated_at"] = datetime.now(timezone.utc)
+    await saved_reports_collection().update_one({"_id": oid}, {"$set": updates})
+    updated = await saved_reports_collection().find_one({"_id": oid})
+    await log_audit(
+        str(current_user.get("user_id", "")),
+        "update",
+        "saved_report",
+        report_id,
+        details={"fields": sorted(payload.model_fields_set)},
+    )
+    return _serialize_saved_report(updated)
+
+
+@router.delete("/reports/saved/{report_id}")
+async def delete_saved_report(
+    report_id: str,
+    current_user: dict = Depends(require_capability("report:write")),
+):
+    if not ObjectId.is_valid(report_id):
+        raise HTTPException(status_code=404, detail="Saved report not found.")
+    result = await saved_reports_collection().delete_one({"_id": ObjectId(report_id)})
+    if not result.deleted_count:
+        raise HTTPException(status_code=404, detail="Saved report not found.")
+    await log_audit(str(current_user.get("user_id", "")), "delete", "saved_report", report_id)
+    return {"deleted": True, "id": report_id}
 
 
 @router.get("/reports/outstanding")

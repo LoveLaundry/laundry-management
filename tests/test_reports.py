@@ -1,6 +1,9 @@
 import os
 import sys
+from datetime import date
 from pathlib import Path
+from bson import ObjectId
+from fastapi import HTTPException
 
 os.environ.setdefault("JWT_SECRET", "test-secret")
 os.environ.setdefault("MASTER_KEY", "test-master-key-1234567890")
@@ -14,6 +17,31 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.routers import reports
+
+
+class FakeSavedReports:
+    def __init__(self):
+        self.document = None
+
+    async def insert_one(self, document):
+        document["_id"] = ObjectId()
+        self.document = dict(document)
+        return type("InsertResult", (), {"inserted_id": document["_id"]})()
+
+    async def find_one(self, query):
+        if self.document and self.document["_id"] == query.get("_id"):
+            return dict(self.document)
+        return None
+
+    async def update_one(self, query, update):
+        if self.document and self.document["_id"] == query.get("_id"):
+            self.document.update(update["$set"])
+
+    async def delete_one(self, query):
+        deleted = int(bool(self.document and self.document["_id"] == query.get("_id")))
+        if deleted:
+            self.document = None
+        return type("DeleteResult", (), {"deleted_count": deleted})()
 
 
 @pytest.mark.asyncio
@@ -71,34 +99,8 @@ async def test_range_report_includes_zero_activity_days(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_master_report_uses_gate_pass_quotation_pricing(monkeypatch):
-    gate_passes = [
-        {
-            "client_name": "Sunrise Hotel",
-            "receiving_date": "2026-10-10",
-            "quotation_id": "q1",
-            "items": [
-                {"item_name": "Shirt", "received_qty": 10.0},
-                {"item_name": "Towel", "received_qty": 3.0},
-            ],
-        },
-        {
-            "client_name": "Sunrise Hotel",
-            "receiving_date": "2026-10-10",
-            "quotation_id": "q1",
-            "items": [
-                {"item_name": "Shirt", "received_qty": 5.0},
-            ],
-        },
-    ]
-
-    monkeypatch.setattr(reports, "_list_gate_passes_for_range", AsyncMock(return_value=gate_passes))
-    monkeypatch.setattr(
-        reports,
-        "_resolve_quotation_prices",
-        AsyncMock(return_value={"Shirt": {"price": 25.0}, "Towel": {"price": 40.0}}),
-    )
-    monkeypatch.setattr(reports, "_dec_expenses", AsyncMock(return_value=[]))
+async def test_master_report_returns_management_expenses_and_payroll(monkeypatch):
+    monkeypatch.setattr(reports, "_dec_expenses", AsyncMock(return_value=[{"amount": 15.0}]))
     monkeypatch.setattr(
         reports,
         "_salary_expense_summary",
@@ -115,14 +117,12 @@ async def test_master_report_uses_gate_pass_quotation_pricing(monkeypatch):
         current_user={"role": "ADMIN"},
     )
 
-    assert result["source_of_truth"] == "gate_pass_quotation_prices"
-    assert result["total_income"] == 495.0
+    assert result["source_of_truth"] == "management_payroll_and_expenses"
     assert result["salary_expense_total"] == 90.0
-    assert result["total_expenses"] == 90.0
+    assert result["other_expense_total"] == 15.0
+    assert result["total_expenses"] == 105.0
     assert result["salary_expenses"][0]["employee_name"] == "Laundry Attendant"
-    assert result["net_profit"] == 405.0
-    assert result["hotel_summary"][0]["client_name"] == "Sunrise Hotel"
-    assert result["hotel_summary"][0]["income"] == 495.0
+    assert "total_income" not in result
 
 
 def test_fixed_monthly_salary_is_prorated_by_calendar_days():
@@ -158,3 +158,37 @@ def test_fixed_monthly_salary_is_prorated_by_calendar_days():
     assert result["epf_employer"] == 80.0
     assert result["etf_employer"] == 30.0
     assert result["salary_expense"] == 1310.0
+
+
+@pytest.mark.asyncio
+async def test_saved_report_can_be_created_edited_and_deleted(monkeypatch):
+    collection = FakeSavedReports()
+    monkeypatch.setattr(reports, "saved_reports_collection", lambda: collection)
+    monkeypatch.setattr(reports, "log_audit", AsyncMock())
+    current_user = {"user_id": "manager-1", "role": "MANAGER"}
+    payload = reports.SavedReportCreate(
+        title="October operations",
+        start_date=date(2026, 10, 1),
+        end_date=date(2026, 10, 31),
+        selected_quotations={"Sunrise Hotel": "quote-1"},
+        report_data={"total_income": 1250.0},
+    )
+
+    created = await reports.create_saved_report(payload, current_user)
+    updated = await reports.update_saved_report(
+        created["id"],
+        reports.SavedReportUpdate(title="October receiving report"),
+        current_user,
+    )
+    with pytest.raises(HTTPException) as error:
+        await reports.update_saved_report(
+            created["id"],
+            reports.SavedReportUpdate(end_date=date(2026, 11, 1)),
+            current_user,
+        )
+    deleted = await reports.delete_saved_report(created["id"], current_user)
+
+    assert created["title"] == "October operations"
+    assert updated["title"] == "October receiving report"
+    assert error.value.status_code == 400
+    assert deleted == {"deleted": True, "id": created["id"]}

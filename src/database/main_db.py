@@ -32,6 +32,7 @@ EXPENSE_TEMPLATES = "expense_templates"
 IMPORTS = "imports"
 AUDIT_LOGS = "audit_logs"
 IDEMPOTENCY_KEYS = "idempotency_keys"
+SAVED_REPORTS = "saved_reports"
 
 
 def _db() -> AsyncIOMotorDatabase:
@@ -134,6 +135,10 @@ def audit_logs_collection() -> AsyncIOMotorCollection:
     return _db()[AUDIT_LOGS]
 
 
+def saved_reports_collection() -> AsyncIOMotorCollection:
+    return _db()[SAVED_REPORTS]
+
+
 async def ensure_indexes() -> None:
     """Create all required indexes at startup."""
     await customers_collection().create_index("name_search", background=True)
@@ -217,3 +222,5 @@ async def ensure_indexes() -> None:
 
     await audit_logs_collection().create_index("created_at", background=True)
     await audit_logs_collection().create_index([("entity_type", 1), ("entity_id", 1)], background=True)
+
+    await saved_reports_collection().create_index([("updated_at", -1)], background=True)
