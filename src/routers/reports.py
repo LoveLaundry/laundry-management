@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from datetime import timedelta
 from typing import Optional
 
+from fastapi import HTTPException
+
 from bson import ObjectId
 from fastapi import APIRouter, Depends, Query
 
@@ -168,20 +170,98 @@ async def profit_loss_report(
 
 @router.get("/reports/daily")
 async def daily_report(
-    report_date: Optional[str] = Query(None),
+    date: Optional[str] = Query(None, alias="date"),
+    report_date: Optional[str] = Query(None, alias="report_date"),
     current_user: dict = Depends(require_capability("report:read")),
 ):
-    day = report_date or _today()
-    txns = await _dec_transactions({"transaction_date": day})
+    selected_date = date or report_date or _today()
+    try:
+        date_type.fromisoformat(selected_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.") from exc
+
+    txns = await _dec_transactions({"transaction_date": selected_date})
     total_qty = round(sum(_num(t.get("total_quantity")) for t in txns), 2)
     revenue = round(sum(_num(t.get("total_amount")) for t in txns), 2)
     cogs = round(sum(_num(t.get("total_cost")) for t in txns), 2)
+    expenses = await _dec_expenses({"date": selected_date})
+    total_expenses = round(sum(_num(e.get("amount")) for e in expenses), 2)
+    net_profit = round(revenue - cogs - total_expenses, 2)
     return {
-        "date": day,
+        "date": selected_date,
         "transactions": len(txns),
         "total_quantity": total_qty,
         "total_revenue": revenue,
+        "total_expenses": total_expenses,
         "gross_profit": round(revenue - cogs, 2),
+        "net_profit": net_profit,
+    }
+
+
+@router.get("/reports/range")
+async def range_report(
+    start_date: Optional[str] = Query(None, alias="start_date"),
+    end_date: Optional[str] = Query(None, alias="end_date"),
+    current_user: dict = Depends(require_capability("report:read")),
+):
+    if not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="Both start_date and end_date are required.")
+
+    try:
+        start = date_type.fromisoformat(start_date)
+        end = date_type.fromisoformat(end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.") from exc
+
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date.")
+
+    daily_rows = []
+    total_revenue = 0.0
+    total_cogs = 0.0
+    total_expenses = 0.0
+    total_quantity = 0.0
+
+    current = start
+    while current <= end:
+        current_str = current.isoformat()
+        txns = await _dec_transactions({"transaction_date": current_str})
+        expenses = await _dec_expenses({"date": current_str})
+
+        daily_revenue = round(sum(_num(t.get("total_amount")) for t in txns), 2)
+        daily_cogs = round(sum(_num(t.get("total_cost")) for t in txns), 2)
+        daily_expenses = round(sum(_num(e.get("amount")) for e in expenses), 2)
+        daily_quantity = round(sum(_num(t.get("total_quantity")) for t in txns), 2)
+
+        total_revenue += daily_revenue
+        total_cogs += daily_cogs
+        total_expenses += daily_expenses
+        total_quantity += daily_quantity
+
+        daily_rows.append(
+            {
+                "date": current_str,
+                "transactions": len(txns),
+                "total_quantity": daily_quantity,
+                "total_revenue": daily_revenue,
+                "total_expenses": daily_expenses,
+                "gross_profit": round(daily_revenue - daily_cogs, 2),
+                "net_profit": round(daily_revenue - daily_cogs - daily_expenses, 2),
+            }
+        )
+        current += timedelta(days=1)
+
+    return {
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "days": len(daily_rows),
+        "transactions": sum(row["transactions"] for row in daily_rows),
+        "total_quantity": round(total_quantity, 2),
+        "total_revenue": round(total_revenue, 2),
+        "total_expenses": round(total_expenses, 2),
+        "gross_profit": round(total_revenue - total_cogs, 2),
+        "net_profit": round(total_revenue - total_cogs - total_expenses, 2),
+        "daily": daily_rows,
     }
 
 
@@ -202,6 +282,8 @@ async def monthly_report(
     total_qty = round(sum(_num(t.get("total_quantity")) for t in txns), 2)
     revenue = round(sum(_num(t.get("total_amount")) for t in txns), 2)
     cogs = round(sum(_num(t.get("total_cost")) for t in txns), 2)
+    expenses = await _dec_expenses({"date": {"$gte": start, "$lt": end}})
+    total_expenses = round(sum(_num(e.get("amount")) for e in expenses), 2)
 
     by_customer: dict = {}
     for t in txns:
@@ -220,7 +302,9 @@ async def monthly_report(
         "transactions": len(txns),
         "total_quantity": total_qty,
         "total_revenue": revenue,
+        "total_expenses": total_expenses,
         "gross_profit": round(revenue - cogs, 2),
+        "net_profit": round(revenue - cogs - total_expenses, 2),
         "revenue_by_customer": revenue_by_customer,
     }
 
@@ -270,3 +354,55 @@ async def outstanding_report(
             })
     result.sort(key=lambda x: x["outstanding"], reverse=True)
     return result
+
+
+@router.get("/reports/health")
+async def reports_health(
+    current_user: dict = Depends(require_capability("report:read")),
+):
+    return {
+        "status": "ok",
+        "service": "laundry-management-reports",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": {
+            "transactions": "available",
+            "expenses": "available",
+        },
+    }
+
+
+@router.get("/reports/data-quality")
+async def data_quality_report(
+    start_date: Optional[str] = Query(None, alias="start_date"),
+    end_date: Optional[str] = Query(None, alias="end_date"),
+    current_user: dict = Depends(require_capability("report:read")),
+):
+    if not start_date or not end_date:
+        raise HTTPException(status_code=400, detail="Both start_date and end_date are required.")
+
+    try:
+        start = date_type.fromisoformat(start_date)
+        end = date_type.fromisoformat(end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.") from exc
+
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date.")
+
+    missing_days = []
+    current = start
+    while current <= end:
+        current_str = current.isoformat()
+        txns = await _dec_transactions({"transaction_date": current_str})
+        expenses = await _dec_expenses({"date": current_str})
+        if not txns and not expenses:
+            missing_days.append(current_str)
+        current += timedelta(days=1)
+
+    return {
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "missing_data_days": missing_days,
+        "missing_data_count": len(missing_days),
+        "status": "complete" if not missing_days else "incomplete_data",
+    }
