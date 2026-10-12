@@ -288,8 +288,92 @@ async def _dec_expenses(query: dict) -> list:
         try:
             result.append(serialize(doc, EXPENSE_SENSITIVE))
         except (ValueError, KeyError):
-            pass
+            # A single undecryptable expense must not silently vanish from the
+            # financial reports — that understates expenses and overstates
+            # profit. Fall back to the raw fields (minus crypto metadata) so the
+            # amount still counts, matching _dec_transactions.
+            result.append({
+                k: v for k, v in doc.items()
+                if k != "encryption_metadata" and not k.endswith("_search")
+            })
     return result
+
+
+def _summaries_from_transactions(txns: list) -> tuple[list, list]:
+    """Hotel-wise and item-wise rollups for a period.
+
+    Pure aggregation so the two report endpoints share one calculation and can
+    never drift apart. Money lines are summed from the stored line values, not
+    recomputed, so historical rates stay exactly as recorded.
+    """
+    hotels: dict = {}
+    items: dict = {}
+    for txn in txns:
+        cid = str(txn.get("customer_id") or "")
+        name = (txn.get("customer_name") or "Unknown").strip() or "Unknown"
+        hotel = hotels.setdefault(cid or name, {
+            "client_name": name,
+            "customer_id": cid or None,
+            "transactions": 0,
+            "total_quantity": 0.0,
+            "total_revenue": 0.0,
+            "total_cost": 0.0,
+            "gross_profit": 0.0,
+            "items": {},
+        })
+        hotel["transactions"] += 1
+        hotel["total_quantity"] += _num(txn.get("total_quantity"))
+        hotel["total_revenue"] += _num(txn.get("total_amount"))
+        hotel["total_cost"] += _num(txn.get("total_cost"))
+        for it in txn.get("items") or []:
+            item_name = (it.get("item_name") or "Unknown").strip() or "Unknown"
+            category = it.get("category_name") or "Uncategorized"
+            key = (item_name, category)
+            row = items.setdefault(key, {
+                "item_name": item_name,
+                "category_name": category,
+                "total_quantity": 0.0,
+                "total_revenue": 0.0,
+                "total_cost": 0.0,
+                "gross_profit": 0.0,
+                "clients": set(),
+            })
+            qty = _num(it.get("quantity_washed")) or _num(it.get("quantity_received"))
+            row["total_quantity"] += qty
+            row["total_revenue"] += _num(it.get("line_total"))
+            row["total_cost"] += _num(it.get("line_cost"))
+            row["clients"].add(name)
+            hotel["items"][item_name] = hotel["items"].get(item_name, 0.0) + qty
+
+    hotel_rows = []
+    for hotel in hotels.values():
+        hotel["total_quantity"] = round(hotel["total_quantity"], 2)
+        hotel["total_revenue"] = round(hotel["total_revenue"], 2)
+        hotel["total_cost"] = round(hotel["total_cost"], 2)
+        hotel["gross_profit"] = round(hotel["total_revenue"] - hotel["total_cost"], 2)
+        hotel["items"] = [
+            {"item_name": k, "quantity": round(v, 2)}
+            for k, v in sorted(hotel["items"].items(), key=lambda kv: kv[1], reverse=True)
+        ]
+        hotel_rows.append(hotel)
+    hotel_rows.sort(key=lambda h: h["total_revenue"], reverse=True)
+
+    item_rows = []
+    for row in items.values():
+        row["total_quantity"] = round(row["total_quantity"], 2)
+        row["total_revenue"] = round(row["total_revenue"], 2)
+        row["total_cost"] = round(row["total_cost"], 2)
+        row["gross_profit"] = round(row["total_revenue"] - row["total_cost"], 2)
+        row["client_count"] = len(row["clients"])
+        row["clients"] = sorted(row["clients"])
+        item_rows.append(row)
+    item_rows.sort(key=lambda i: i["total_revenue"], reverse=True)
+
+    return hotel_rows, item_rows
+
+
+async def _report_transactions(start_date: str, end_date: str) -> list:
+    return await _dec_transactions({"transaction_date": {"$gte": start_date, "$lte": end_date}})
 
 
 @router.get("/reports/profit-loss")
@@ -581,8 +665,9 @@ async def hotel_wise_report(
     if not start_date or not end_date:
         raise HTTPException(status_code=400, detail="Both start_date and end_date are required.")
 
-    payload = await _master_report_data(start_date, end_date)
-    return payload["hotel_summary"]
+    txns = await _report_transactions(start_date, end_date)
+    hotel_summary, _ = _summaries_from_transactions(txns)
+    return hotel_summary
 
 
 @router.get("/reports/item-wise")
@@ -594,8 +679,9 @@ async def item_wise_report(
     if not start_date or not end_date:
         raise HTTPException(status_code=400, detail="Both start_date and end_date are required.")
 
-    payload = await _master_report_data(start_date, end_date)
-    return payload["item_summary"]
+    txns = await _report_transactions(start_date, end_date)
+    _, item_summary = _summaries_from_transactions(txns)
+    return item_summary
 
 
 def _serialize_saved_report(doc: dict) -> dict:

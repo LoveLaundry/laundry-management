@@ -192,3 +192,82 @@ async def test_saved_report_can_be_created_edited_and_deleted(monkeypatch):
     assert updated["title"] == "October receiving report"
     assert error.value.status_code == 400
     assert deleted == {"deleted": True, "id": created["id"]}
+
+
+@pytest.mark.asyncio
+async def test_hotel_and_item_wise_reports_aggregate_transactions(monkeypatch):
+    txns = [
+        {
+            "customer_id": "c1",
+            "customer_name": "Sunrise Hotel",
+            "total_quantity": 10,
+            "total_amount": 1000.0,
+            "total_cost": 400.0,
+            "items": [
+                {"item_name": "Bedsheet", "category_name": "Linen",
+                 "quantity_washed": 10, "line_total": 1000.0, "line_cost": 400.0},
+            ],
+        },
+        {
+            "customer_id": "c1",
+            "customer_name": "Sunrise Hotel",
+            "total_quantity": 5,
+            "total_amount": 500.0,
+            "total_cost": 100.0,
+            "items": [
+                {"item_name": "Towel", "category_name": "Linen",
+                 "quantity_washed": 5, "line_total": 500.0, "line_cost": 100.0},
+            ],
+        },
+    ]
+    monkeypatch.setattr(reports, "_report_transactions", AsyncMock(return_value=txns))
+
+    hotels = await reports.hotel_wise_report(
+        start_date="2026-10-01", end_date="2026-10-31", current_user={"role": "ADMIN"}
+    )
+    assert len(hotels) == 1
+    assert hotels[0]["client_name"] == "Sunrise Hotel"
+    assert hotels[0]["transactions"] == 2
+    assert hotels[0]["total_revenue"] == 1500.0
+    assert hotels[0]["gross_profit"] == 1000.0
+
+    items = await reports.item_wise_report(
+        start_date="2026-10-01", end_date="2026-10-31", current_user={"role": "ADMIN"}
+    )
+    by_name = {row["item_name"]: row for row in items}
+    assert by_name["Bedsheet"]["total_quantity"] == 10
+    assert by_name["Bedsheet"]["client_count"] == 1
+    assert by_name["Towel"]["gross_profit"] == 400.0
+
+
+def test_dec_expenses_falls_back_instead_of_dropping(monkeypatch):
+    class FakeCursor:
+        def __init__(self, docs):
+            self._docs = docs
+
+        async def to_list(self, length=None):
+            return self._docs
+
+    class FakeCollection:
+        def __init__(self, docs):
+            self._docs = docs
+
+        def find(self, query):
+            return FakeCursor(self._docs)
+
+    docs = [{
+        "_id": ObjectId(),
+        "amount": 25.0,
+        "date": "2026-10-01",
+        "description": {"broken": "ciphertext"},  # serialize will raise
+        "encryption_metadata": {"v": 1},
+        "description_search": "x",
+    }]
+    monkeypatch.setattr(reports, "expenses_collection", lambda: FakeCollection(docs))
+
+    import asyncio
+    rows = asyncio.run(reports._dec_expenses({"date": {"$gte": "2026-10-01"}}))
+    assert len(rows) == 1
+    assert rows[0]["amount"] == 25.0
+    assert "encryption_metadata" not in rows[0]
+    assert "description_search" not in rows[0]
