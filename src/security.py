@@ -51,12 +51,17 @@ def _generate_req_id() -> str:
     return hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:16]
 
 
-def apply_security(app: FastAPI, rate_limit: int = 300) -> None:
-    """Mount CORS, security headers, and rate limiting on the FastAPI app."""
+def apply_security(app: FastAPI, rate_limit: int = 300, origins: list[str] | None = None) -> None:
+    """Mount CORS, security headers, and rate limiting on the FastAPI app.
+
+    An explicit ``origins`` list wins; otherwise the configured
+    ``settings.cors_origins`` apply.
+    """
     from fastapi.middleware.cors import CORSMiddleware
     from .config import settings
 
-    origins = settings.cors_origins
+    if origins is None:
+        origins = settings.cors_origins
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,

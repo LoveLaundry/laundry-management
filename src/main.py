@@ -55,7 +55,7 @@ ALLOWED_ORIGINS = [
 ]
 
 origins = ALLOWED_ORIGINS if settings.cors_origins == ["*"] or not settings.cors_origins else settings.cors_origins
-apply_security(app, rate_limit=300)
+apply_security(app, rate_limit=300, origins=origins)
 
 
 @app.get("/")
