@@ -5,6 +5,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, owned_filter, resolve_laundry_id, scoped_query
 from ..database.main_db import (
     extra_work_categories_collection,
     extra_work_records_collection,
@@ -32,6 +33,7 @@ async def list_categories(
     query: dict = {}
     if is_active is not None:
         query["is_active"] = is_active
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = extra_work_categories_collection().find(query).sort("name", 1)
     return [serialize(doc, []) async for doc in cursor]
 
@@ -43,8 +45,7 @@ async def get_category(
 ):
     oid = _parse_oid(category_id, "category")
     doc = await extra_work_categories_collection().find_one({"_id": oid})
-    if not doc:
-        raise NotFoundError("Extra work category", category_id)
+    assert_same_laundry(doc, resolve_laundry_id(current_user), "Extra work category")
     return serialize(doc, [])
 
 
@@ -54,6 +55,7 @@ async def create_category(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     doc = {
+        "laundry_id": resolve_laundry_id(current_user),
         "name": payload.name.strip(),
         "description": (payload.description or "").strip() or None,
         "rate": round(payload.rate, 2),
@@ -79,10 +81,10 @@ async def update_category(
     payload: ExtraWorkCategoryUpdate,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(category_id, "category")
     existing = await extra_work_categories_collection().find_one({"_id": oid})
-    if not existing:
-        raise NotFoundError("Extra work category", category_id)
+    assert_same_laundry(existing, laundry_id, "Extra work category")
 
     updates = payload.model_dump(exclude_none=True)
     if "rate" in updates:
@@ -90,12 +92,12 @@ async def update_category(
     updates["updated_at"] = datetime.now(timezone.utc)
 
     if len(updates) > 1:
-        await extra_work_categories_collection().update_one({"_id": oid}, {"$set": updates})
+        await extra_work_categories_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
     await log_audit(
         str(current_user.get("user_id", "")),
         "update", "extra_work_category", category_id, details={},
     )
-    updated = await extra_work_categories_collection().find_one({"_id": oid})
+    updated = await extra_work_categories_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, [])
 
 
@@ -104,12 +106,12 @@ async def delete_category(
     category_id: str,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(category_id, "category")
     existing = await extra_work_categories_collection().find_one({"_id": oid})
-    if not existing:
-        raise NotFoundError("Extra work category", category_id)
+    assert_same_laundry(existing, laundry_id, "Extra work category")
     await extra_work_categories_collection().update_one(
-        {"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
+        owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
     )
     await log_audit(
         str(current_user.get("user_id", "")),
@@ -141,6 +143,7 @@ async def list_records(
         if end_date:
             date_q["$lte"] = end_date
         query["date"] = date_q
+    query = scoped_query(query, resolve_laundry_id(current_user))
     total = await extra_work_records_collection().count_documents(query)
     cursor = extra_work_records_collection().find(query).sort("date", -1).skip(offset).limit(limit)
     items = [serialize(doc, []) async for doc in cursor]
@@ -152,15 +155,14 @@ async def create_record(
     payload: ExtraWorkRecordCreate,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     emp_oid = _parse_oid(payload.employee_id, "employee")
     emp = await employees_collection().find_one({"_id": emp_oid})
-    if not emp:
-        raise NotFoundError("Employee", payload.employee_id)
+    assert_same_laundry(emp, laundry_id, "Employee")
 
     cat_oid = _parse_oid(payload.category_id, "category")
     cat = await extra_work_categories_collection().find_one({"_id": cat_oid})
-    if not cat:
-        raise NotFoundError("Extra work category", payload.category_id)
+    assert_same_laundry(cat, laundry_id, "Extra work category")
     if not cat.get("is_active"):
         raise BadRequestError("Extra work category is inactive")
 
@@ -169,6 +171,7 @@ async def create_record(
         amount = round(payload.units * cat.get("rate", 0), 2)
 
     doc = {
+        "laundry_id": laundry_id,
         "employee_id": payload.employee_id,
         "category_id": payload.category_id,
         "category_name": cat.get("name"),
@@ -196,10 +199,10 @@ async def update_record(
     payload: ExtraWorkRecordUpdate,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(record_id, "record")
     existing = await extra_work_records_collection().find_one({"_id": oid})
-    if not existing:
-        raise NotFoundError("Extra work record", record_id)
+    assert_same_laundry(existing, laundry_id, "Extra work record")
 
     updates = payload.model_dump(exclude_none=True)
     if "date" in updates and updates["date"] is not None:
@@ -210,9 +213,9 @@ async def update_record(
         updates["units"] = round(float(updates["units"]), 2)
 
     if len(updates) > 0:
-        await extra_work_records_collection().update_one({"_id": oid}, {"$set": updates})
+        await extra_work_records_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
 
-    updated = await extra_work_records_collection().find_one({"_id": oid})
+    updated = await extra_work_records_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, [])
 
 
@@ -221,11 +224,11 @@ async def delete_record(
     record_id: str,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(record_id, "record")
     existing = await extra_work_records_collection().find_one({"_id": oid})
-    if not existing:
-        raise NotFoundError("Extra work record", record_id)
-    await extra_work_records_collection().delete_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Extra work record")
+    await extra_work_records_collection().delete_one(owned_filter(oid, laundry_id))
     await log_audit(
         str(current_user.get("user_id", "")),
         "delete", "extra_work_record", record_id, details={},
