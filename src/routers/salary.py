@@ -7,6 +7,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, Query, Request
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query, match_stage
 from ..database.main_db import (
     employees_collection,
     salary_slips_collection,
@@ -59,23 +60,29 @@ DEFAULT_SETTINGS = {
 }
 
 
-async def _get_company_settings() -> dict:
-    doc = await company_settings_collection().find_one({"key": "main"})
+async def _get_company_settings(laundry_id: str) -> dict:
+    query = {"key": "main"}
+    if laundry_id:
+        query = scoped_query(query, laundry_id)
+    doc = await company_settings_collection().find_one(query)
     return {**DEFAULT_SETTINGS, **(doc or {})}
 
 
-async def _get_holiday_dates(start: str, end: str) -> set:
+async def _get_holiday_dates(start: str, end: str, laundry_id: str) -> set:
     """Return ISO date strings in [start, end], expanding recurring (yearly) holidays."""
     start_date = date_cls.fromisoformat(start)
     end_date = date_cls.fromisoformat(end)
     result: set = set()
 
-    cursor = holidays_collection().find({
+    holiday_query = {
         "$or": [
             {"date": {"$lte": end}},
             {"is_recurring": True, "date": {"$gt": end}},
         ]
-    }).sort("date", 1)
+    }
+    if laundry_id:
+        holiday_query = scoped_query(holiday_query, laundry_id)
+    cursor = holidays_collection().find(holiday_query).sort("date", 1)
     async for doc in cursor:
         h_date = doc.get("date")
         if not h_date:
@@ -99,29 +106,36 @@ async def _get_holiday_dates(start: str, end: str) -> set:
     return result
 
 
-async def _get_attendance(employee_id: str, start: str, end: str) -> list:
+async def _get_attendance(employee_id: str, start: str, end: str, laundry_id: str) -> list:
     query = {
         "employee_id": employee_id,
         "date": {"$gte": start, "$lte": end},
     }
+    if laundry_id:
+        query = scoped_query(query, laundry_id)
     cursor = attendance_collection().find(query).sort("date", 1)
     return [doc async for doc in cursor]
 
 
-async def _get_extra_work(employee_id: str, start: str, end: str) -> list:
+async def _get_extra_work(employee_id: str, start: str, end: str, laundry_id: str) -> list:
     query = {
         "employee_id": employee_id,
         "date": {"$gte": start, "$lte": end},
     }
+    if laundry_id:
+        query = scoped_query(query, laundry_id)
     cursor = extra_work_records_collection().find(query).sort("date", 1)
     return [doc async for doc in cursor]
 
 
-async def _get_outstanding_advances(employee_id: str) -> list:
-    cursor = salary_advances_collection().find({
+async def _get_outstanding_advances(employee_id: str, laundry_id: str) -> list:
+    query = {
         "employee_id": employee_id,
         "status": "OUTSTANDING",
-    }).sort("date", 1)
+    }
+    if laundry_id:
+        query = scoped_query(query, laundry_id)
+    cursor = salary_advances_collection().find(query).sort("date", 1)
     return [doc async for doc in cursor]
 
 
@@ -133,13 +147,14 @@ async def _prefetch_payroll_data(
     employee_ids: list,
     start_date: str,
     end_date: str,
+    laundry_id: str,
 ) -> dict:
     """Load every payroll input for a batch of employees in a handful of queries
     instead of ~6 sequential round-trips per employee (N+1)."""
     ids = list(employee_ids)
     if not ids:
         return {
-            "settings": await _get_company_settings(),
+            "settings": await _get_company_settings(laundry_id),
             "holiday_dates": set(),
             "packages": {},
             "attendance": {},
@@ -148,30 +163,34 @@ async def _prefetch_payroll_data(
             "slips": {},
         }
 
-    settings_fut = _get_company_settings()
-    holidays_fut = _get_holiday_dates(start_date, end_date)
-    packages_fut = _collect(salary_packages_collection().find({
+    settings_fut = _get_company_settings(laundry_id)
+    holidays_fut = _get_holiday_dates(start_date, end_date, laundry_id)
+
+    def _scope(query: dict) -> dict:
+        return scoped_query(query, laundry_id)
+
+    packages_fut = _collect(salary_packages_collection().find(_scope({
         "employee_id": {"$in": ids},
         "month": start_date[:7],
-    }))
-    attendance_fut = _collect(attendance_collection().find({
+    })))
+    attendance_fut = _collect(attendance_collection().find(_scope({
         "employee_id": {"$in": ids},
         "date": {"$gte": start_date, "$lte": end_date},
-    }))
-    extra_work_fut = _collect(extra_work_records_collection().find({
+    })))
+    extra_work_fut = _collect(extra_work_records_collection().find(_scope({
         "employee_id": {"$in": ids},
         "date": {"$gte": start_date, "$lte": end_date},
-    }))
-    advances_fut = _collect(salary_advances_collection().find({
+    })))
+    advances_fut = _collect(salary_advances_collection().find(_scope({
         "employee_id": {"$in": ids},
         "status": "OUTSTANDING",
-    }).sort("date", 1))
-    slips_fut = _collect(salary_slips_collection().find({
+    })).sort("date", 1))
+    slips_fut = _collect(salary_slips_collection().find(_scope({
         "employee_id": {"$in": ids},
         "period_start": {"$lte": end_date},
         "period_end": {"$gte": start_date},
         "status": {"$nin": ["CANCELLED", "DELETED"]},
-    }))
+    })))
 
     settings, holiday_dates, packages, attendance, extra_work, advances, slips = await asyncio.gather(
         settings_fut, holidays_fut, packages_fut, attendance_fut,
@@ -214,6 +233,8 @@ async def _calculate_period_salary(
     period_type: str = "MONTHLY",
     preloaded: Optional[dict] = None,
     full_attendance: bool = False,
+    *,
+    laundry_id: str,
 ) -> dict:
     """Calculate salary for an arbitrary date period (monthly / weekly / custom).
 
@@ -235,24 +256,30 @@ async def _calculate_period_salary(
         outstanding_advances = preloaded["advances"].get(employee_id, [])
         existing_slip = preloaded["slips"].get(employee_id)
     else:
-        settings = await _get_company_settings()
+        settings = await _get_company_settings(laundry_id)
 
-        salary_pkg = await salary_packages_collection().find_one({
+        pkg_query = {
             "employee_id": employee_id,
             "month": start_date[:7],
-        })
+        }
+        if laundry_id:
+            pkg_query = scoped_query(pkg_query, laundry_id)
+        salary_pkg = await salary_packages_collection().find_one(pkg_query)
 
-        holiday_dates = await _get_holiday_dates(start_date, end_date)
-        attendance_records = await _get_attendance(employee_id, start_date, end_date)
-        extra_work_records = await _get_extra_work(employee_id, start_date, end_date)
-        outstanding_advances = await _get_outstanding_advances(employee_id)
+        holiday_dates = await _get_holiday_dates(start_date, end_date, laundry_id)
+        attendance_records = await _get_attendance(employee_id, start_date, end_date, laundry_id)
+        extra_work_records = await _get_extra_work(employee_id, start_date, end_date, laundry_id)
+        outstanding_advances = await _get_outstanding_advances(employee_id, laundry_id)
 
-        existing_slip = await salary_slips_collection().find_one({
+        slip_query = {
             "employee_id": employee_id,
             "period_start": {"$lte": end_date},
             "period_end": {"$gte": start_date},
             "status": {"$nin": ["CANCELLED", "DELETED"]},
-        })
+        }
+        if laundry_id:
+            slip_query = scoped_query(slip_query, laundry_id)
+        existing_slip = await salary_slips_collection().find_one(slip_query)
 
     def _arr(field, default):
         if salary_pkg is not None and field in salary_pkg and salary_pkg.get(field) is not None:
@@ -565,6 +592,7 @@ async def calculate_salary(
     current_user: dict = Depends(require_capability("salary:read")),
 ):
     emp_oid = _parse_oid(employee_id, "employee")
+    laundry_id = resolve_laundry_id(current_user)
     emp = await employees_collection().find_one({"_id": emp_oid})
     if not emp:
         raise NotFoundError("Employee", employee_id)
@@ -573,7 +601,7 @@ async def calculate_salary(
     num_days = calendar.monthrange(year, month)[1]
     start_date = f"{year:04d}-{month:02d}-01"
     end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
-    return await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, period_type="MONTHLY")
+    return await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, period_type="MONTHLY", laundry_id=laundry_id)
 
 
 # ── Period / Weekly Salary Calculation ────────────────────────────────────
@@ -587,34 +615,30 @@ async def calculate_period_salary(
     current_user: dict = Depends(require_capability("salary:read")),
 ):
     emp_oid = _parse_oid(employee_id, "employee")
+    laundry_id = resolve_laundry_id(current_user)
     emp = await employees_collection().find_one({"_id": emp_oid})
     if not emp:
         raise NotFoundError("Employee", employee_id)
 
     emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
-    return await _calculate_period_salary(emp, emp_decrypted, period_start, period_end, period_type=period_type)
+    return await _calculate_period_salary(emp, emp_decrypted, period_start, period_end, period_type=period_type, laundry_id=laundry_id)
 
 
 # ── Generate / Save Salary Slip ───────────────────────────────────────────
-async def _find_overlapping_slip(employee_id: str, start_str: str, end_str: str) -> Optional[dict]:
-    """Return the first non-cancelled/deleted slip whose date range overlaps
-    [start_str, end_str] for the same employee. Prevents the same date from
-    being paid more than once (e.g. weekly slip + custom range slip)."""
-    return await salary_slips_collection().find_one({
+async def _find_overlapping_slip(employee_id: str, start_str: str, end_str: str, laundry_id: str) -> Optional[dict]:
+    query = {
         "employee_id": employee_id,
         "status": {"$nin": ["CANCELLED", "DELETED"]},
         "period_start": {"$lte": end_str},
         "period_end": {"$gte": start_str},
-    })
+    }
+    if laundry_id:
+        query = scoped_query(query, laundry_id)
+    return await salary_slips_collection().find_one(query)
 
 
-async def _validate_advance_details(advance_details: list, period_start_str: str) -> tuple:
-    """Validate slip advance deductions against the live advance balances.
-
-    Guarantees each advance is listed once, exists, is not over-deducted, and
-    returns (normalized details, total deduction) so the slip ledger matches
-    the advance ledger exactly.
-    """
+async def _validate_advance_details(advance_details: list, period_start_str: str, laundry_id: str) -> tuple:
+    """Validate slip advance deductions against the live advance balances."""
     if not advance_details:
         return [], 0.0
 
@@ -632,9 +656,10 @@ async def _validate_advance_details(advance_details: list, period_start_str: str
     if not seen:
         return [], 0.0
 
-    adv_docs = await salary_advances_collection().find(
-        {"_id": {"$in": [ObjectId(a) for a in seen]}}
-    ).to_list(length=None)
+    adv_query = {"_id": {"$in": [ObjectId(a) for a in seen]}}
+    if laundry_id:
+        adv_query = scoped_query(adv_query, laundry_id)
+    adv_docs = await salary_advances_collection().find(adv_query).to_list(length=None)
     adv_map = {str(a["_id"]): a for a in adv_docs}
 
     for d in advance_details:
@@ -674,6 +699,7 @@ async def create_salary_slip(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     emp_oid = _parse_oid(payload.employee_id, "employee")
+    laundry_id = resolve_laundry_id(current_user)
     emp = await employees_collection().find_one({"_id": emp_oid})
     if not emp:
         raise NotFoundError("Employee", payload.employee_id)
@@ -684,7 +710,7 @@ async def create_salary_slip(
     period_start_str = payload.period_start.isoformat() if hasattr(payload.period_start, "isoformat") else str(payload.period_start)
     period_end_str = payload.period_end.isoformat() if hasattr(payload.period_end, "isoformat") else str(payload.period_end)
 
-    existing = await _find_overlapping_slip(payload.employee_id, period_start_str, period_end_str)
+    existing = await _find_overlapping_slip(payload.employee_id, period_start_str, period_end_str, laundry_id)
     if existing:
         raise ConflictError(
             f"Dates {period_start_str} to {period_end_str} are already covered by a previous salary slip "
@@ -693,7 +719,7 @@ async def create_salary_slip(
         )
 
     advance_details, advance_deductions = await _validate_advance_details(
-        payload.advance_details or [], period_start_str,
+        payload.advance_details or [], period_start_str, laundry_id,
     )
     if advance_details:
         payload = payload.model_copy(update={"advance_deductions": advance_deductions})
@@ -702,9 +728,9 @@ async def create_salary_slip(
     emp_name = emp_decrypted.get("name", "Unknown")
     salary_type = emp.get("salary_type", "MONTHLY")
 
-    slip_count_for_emp = await salary_slips_collection().count_documents({
-        "employee_id": payload.employee_id,
-    })
+    slip_count_for_emp = await salary_slips_collection().count_documents(
+        scoped_query({"employee_id": payload.employee_id}, laundry_id)
+    )
     emp_code = emp.get("employee_code") or f"EMP{slip_count_for_emp + 1:03d}"
     slip_number = f"{emp_code}-{period_start_str[:7].replace('-', '')}-{slip_count_for_emp + 1:04d}"
 
@@ -783,6 +809,7 @@ async def create_salary_slip(
         "status": payload.status,
         "slip_number": slip_number,
         "notes": (payload.notes or "").strip() or None,
+        "laundry_id": laundry_id,
         "created_by": str(current_user.get("user_id", "")),
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
@@ -795,7 +822,7 @@ async def create_salary_slip(
         if adv_id and ObjectId.is_valid(adv_id):
             deducted_amt = _num(adv_detail.get("amount_deducted"))
             await salary_advances_collection().update_one(
-                {"_id": ObjectId(adv_id)},
+                owned_filter(ObjectId(adv_id), laundry_id),
                 {
                     "$inc": {"total_deducted": deducted_amt, "outstanding": -deducted_amt},
                     "$push": {
@@ -808,10 +835,10 @@ async def create_salary_slip(
                     "$set": {"updated_at": datetime.now(timezone.utc)},
                 },
             )
-            adv = await salary_advances_collection().find_one({"_id": ObjectId(adv_id)})
+            adv = await salary_advances_collection().find_one(owned_filter(ObjectId(adv_id), laundry_id))
             if adv and _num(adv.get("outstanding")) <= 0:
                 await salary_advances_collection().update_one(
-                    {"_id": ObjectId(adv_id)},
+                    owned_filter(ObjectId(adv_id), laundry_id),
                     {"$set": {"status": "FULLY_DEDUCTED", "outstanding": 0, "updated_at": datetime.now(timezone.utc)}},
                 )
 
@@ -851,6 +878,7 @@ async def list_salary_slips(
     if month and year:
         query["period_start"] = {"$regex": f"^{year:04d}-{month:02d}-"}
 
+    query = scoped_query(query, resolve_laundry_id(current_user))
     total = await salary_slips_collection().count_documents(query)
     cursor = salary_slips_collection().find(query).sort("created_at", -1).skip(offset).limit(limit)
     items = [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]
@@ -865,6 +893,7 @@ async def get_salary_slip(
 ):
     oid = _parse_oid(slip_id, "slip")
     doc = await salary_slips_collection().find_one({"_id": oid})
+    assert_same_laundry(doc, resolve_laundry_id(current_user), "Salary slip")
     if not doc:
         raise NotFoundError("Salary slip", slip_id)
     return serialize(doc, SALARY_SENSITIVE)
@@ -878,7 +907,9 @@ async def update_salary_slip(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(slip_id, "slip")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_slips_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Salary slip")
     if not existing:
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "CANCELLED":
@@ -929,12 +960,12 @@ async def update_salary_slip(
     updates["net_salary"] = net_salary
     updates["updated_at"] = datetime.now(timezone.utc)
 
-    await salary_slips_collection().update_one({"_id": oid}, {"$set": updates})
+    await salary_slips_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
     await log_audit(
         str(current_user.get("user_id", "")),
         "update", "salary_slip", slip_id, details={"net": net_salary},
     )
-    updated = await salary_slips_collection().find_one({"_id": oid})
+    updated = await salary_slips_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, SALARY_SENSITIVE)
 
 
@@ -945,7 +976,9 @@ async def finalize_salary_slip(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(slip_id, "slip")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_slips_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Salary slip")
     if not existing:
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "FINALIZED":
@@ -956,7 +989,7 @@ async def finalize_salary_slip(
         raise BadRequestError("Cannot finalize a deleted salary slip")
 
     await salary_slips_collection().update_one(
-        {"_id": oid},
+        owned_filter(oid, laundry_id),
         {"$set": {"status": "FINALIZED", "updated_at": datetime.now(timezone.utc)}},
     )
     await log_audit(
@@ -973,7 +1006,9 @@ async def cancel_salary_slip(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(slip_id, "slip")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_slips_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Salary slip")
     if not existing:
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "CANCELLED":
@@ -986,7 +1021,7 @@ async def cancel_salary_slip(
         if adv_id and ObjectId.is_valid(adv_id):
             deducted_amt = _num(adv_detail.get("amount_deducted"))
             await salary_advances_collection().update_one(
-                {"_id": ObjectId(adv_id)},
+                owned_filter(ObjectId(adv_id), laundry_id),
                 {
                     "$inc": {"total_deducted": -deducted_amt, "outstanding": deducted_amt},
                     "$pull": {"deductions": {"salary_slip_id": slip_id}},
@@ -995,7 +1030,7 @@ async def cancel_salary_slip(
             )
 
     await salary_slips_collection().update_one(
-        {"_id": oid},
+        owned_filter(oid, laundry_id),
         {"$set": {"status": "CANCELLED", "updated_at": datetime.now(timezone.utc)}},
     )
     await log_audit(
@@ -1012,7 +1047,9 @@ async def delete_salary_slip(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(slip_id, "slip")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_slips_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Salary slip")
     if not existing:
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "DELETED":
@@ -1021,7 +1058,7 @@ async def delete_salary_slip(
         raise BadRequestError("Only a cancelled salary slip can be deleted")
 
     await salary_slips_collection().update_one(
-        {"_id": oid},
+        owned_filter(oid, laundry_id),
         {"$set": {
             "status": "DELETED",
             "deleted_at": naive_stamp(datetime.now(UTC)),
@@ -1043,7 +1080,9 @@ async def mark_salary_paid(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(slip_id, "slip")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_slips_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Salary slip")
     if not existing:
         raise NotFoundError("Salary slip", slip_id)
     if existing.get("status") == "CANCELLED":
@@ -1054,7 +1093,7 @@ async def mark_salary_paid(
         raise BadRequestError("Payment amount must be greater than zero")
 
     await salary_slips_collection().update_one(
-        {"_id": oid},
+        owned_filter(oid, laundry_id),
         {"$set": {
             "amount_paid": round(amount, 2),
             "paid": True,
@@ -1076,9 +1115,11 @@ async def employee_salary_history(
     current_user: dict = Depends(require_capability("salary:read")),
 ):
     _parse_oid(employee_id, "employee")
-    cursor = salary_slips_collection().find(
-        {"employee_id": employee_id, "status": {"$ne": "DELETED"}}
-    ).sort("period_start", -1)
+    query = scoped_query(
+        {"employee_id": employee_id, "status": {"$ne": "DELETED"}},
+        resolve_laundry_id(current_user),
+    )
+    cursor = salary_slips_collection().find(query).sort("period_start", -1)
     return [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]
 
 
@@ -1092,6 +1133,7 @@ async def bulk_set_attendance(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     _parse_oid(employee_id, "employee")
+    laundry_id = resolve_laundry_id(current_user)
     emp = await employees_collection().find_one({"_id": ObjectId(employee_id)}, {"attendance_required": 1})
     if emp and emp.get("attendance_required") is False:
         raise BadRequestError("Attendance is not required for this employee (fixed salary arrangement)")
@@ -1105,10 +1147,11 @@ async def bulk_set_attendance(
             "check_in_time": None,
             "check_out_time": None,
             "notes": None,
+            "laundry_id": laundry_id,
             "created_at": datetime.now(timezone.utc),
         }
         await attendance_collection().update_one(
-            {"employee_id": employee_id, "date": d},
+            scoped_query({"employee_id": employee_id, "date": d}, laundry_id),
             {"$set": doc},
             upsert=True,
         )
@@ -1126,6 +1169,7 @@ async def bulk_day_attendance(
     user_id = str(current_user.get("user_id", ""))
     if await idempotency.was_processed(request, user_id):
         return {"success": True, "count": 0, "duplicate": True}
+    laundry_id = resolve_laundry_id(current_user)
     now = datetime.now(timezone.utc)
     date_str = payload.date.isoformat() if hasattr(payload.date, "isoformat") else payload.date
     count = 0
@@ -1145,10 +1189,11 @@ async def bulk_day_attendance(
             "check_in_time": None,
             "check_out_time": None,
             "notes": None,
+            "laundry_id": laundry_id,
             "updated_at": now,
         }
         await attendance_collection().update_one(
-            {"employee_id": rec.employee_id, "date": date_str},
+            scoped_query({"employee_id": rec.employee_id, "date": date_str}, laundry_id),
             {
                 "$set": doc,
                 "$setOnInsert": {
@@ -1183,6 +1228,7 @@ async def list_attendance_range(
         if end_date:
             dateq["$lte"] = end_date
         query["date"] = dateq
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = attendance_collection().find(query).sort("date", 1)
     return [serialize(doc, ["notes"]) async for doc in cursor]
 
@@ -1196,9 +1242,10 @@ async def attendance_summary(
     current_user: dict = Depends(require_capability("salary:read")),
 ):
     _parse_oid(employee_id, "employee")
-    settings = await _get_company_settings()
+    laundry_id = resolve_laundry_id(current_user)
+    settings = await _get_company_settings(laundry_id)
     working_days_pattern = settings.get("working_days_pattern", [0, 1, 2, 3, 4, 5])
-    holiday_dates = await _get_holiday_dates(start_date, end_date)
+    holiday_dates = await _get_holiday_dates(start_date, end_date, laundry_id)
 
     emp = await employees_collection().find_one({"_id": _parse_oid(employee_id, "employee")})
     start_dt = date_cls.fromisoformat(start_date)
@@ -1219,7 +1266,7 @@ async def attendance_summary(
             except (ValueError, AttributeError):
                 pass
 
-    records = await _get_attendance(employee_id, start_date, end_date)
+    records = await _get_attendance(employee_id, start_date, end_date, laundry_id)
     by_date = {rec["date"]: rec for rec in records}
 
     worked_days = 0.0
@@ -1305,13 +1352,14 @@ async def payroll_preview(
     num_days = calendar.monthrange(year, month)[1]
     start_date = f"{year:04d}-{month:02d}-01"
     end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
+    laundry_id = resolve_laundry_id(current_user)
 
-    emps = [emp async for emp in employees_collection().find({"is_active": True})]
+    emps = [emp async for emp in employees_collection().find(scoped_query({"is_active": True}, laundry_id))]
 
     results = []
     if emps:
         preloaded = await _prefetch_payroll_data(
-            [str(e["_id"]) for e in emps], start_date, end_date,
+            [str(e["_id"]) for e in emps], start_date, end_date, laundry_id,
         )
         sem = asyncio.Semaphore(8)
 
@@ -1319,7 +1367,7 @@ async def payroll_preview(
             async with sem:
                 emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
                 calc = await _calculate_period_salary(
-                    emp, emp_decrypted, start_date, end_date, "MONTHLY", preloaded=preloaded,
+                    emp, emp_decrypted, start_date, end_date, "MONTHLY", preloaded=preloaded, laundry_id=laundry_id,
                 )
                 if not calc.get("attendance_required"):
                     calc["projected_worked_days"] = calc.get("worked_days")
@@ -1328,7 +1376,7 @@ async def payroll_preview(
                 else:
                     projected = await _calculate_period_salary(
                         emp, emp_decrypted, start_date, end_date, "MONTHLY",
-                        preloaded=preloaded, full_attendance=True,
+                        preloaded=preloaded, full_attendance=True, laundry_id=laundry_id,
                     )
                     calc["projected_worked_days"] = int(projected.get("worked_days") or 0)
                     calc["projected_gross_salary"] = round(_num(projected.get("gross_salary")), 2)
@@ -1371,15 +1419,16 @@ async def run_payroll(
     num_days = calendar.monthrange(year, month)[1]
     start_date = f"{year:04d}-{month:02d}-01"
     end_date = f"{year:04d}-{month:02d}-{num_days:02d}"
+    laundry_id = resolve_laundry_id(current_user)
 
-    emps = [emp async for emp in employees_collection().find({"is_active": True})]
+    emps = [emp async for emp in employees_collection().find(scoped_query({"is_active": True}, laundry_id))]
 
     skipped = []
     to_create = []
     preloaded = None
     if emps:
         preloaded = await _prefetch_payroll_data(
-            [str(e["_id"]) for e in emps], start_date, end_date,
+            [str(e["_id"]) for e in emps], start_date, end_date, laundry_id,
         )
         for emp in emps:
             employee_id = str(emp["_id"])
@@ -1401,7 +1450,7 @@ async def run_payroll(
                 async with sem:
                     emp_decrypted = decrypt_dict(emp, EMPLOYEE_SENSITIVE)
                     calc = await _calculate_period_salary(
-                        emp, emp_decrypted, start_date, end_date, "MONTHLY", preloaded=preloaded,
+                        emp, emp_decrypted, start_date, end_date, "MONTHLY", preloaded=preloaded, laundry_id=laundry_id,
                     )
                     payload = SalarySlipCreate(
                         employee_id=employee_id,
@@ -1473,16 +1522,18 @@ def _validate_month(value: str) -> str:
     return f"{int(y):04d}-{int(m):02d}"
 
 
-async def _package_locked(employee_id: str, month: str) -> bool:
-    """A finalized/paid slip makes the month's arrangement immutable."""
+async def _package_locked(employee_id: str, month: str, laundry_id: str) -> bool:
     year, mon = int(month[:4]), int(month[5:7])
     num_days = calendar.monthrange(year, mon)[1]
-    existing = await salary_slips_collection().find_one({
+    query = {
         "employee_id": employee_id,
         "period_start": f"{month}-01",
         "period_end": f"{month}-{num_days:02d}",
         "status": {"$in": ["FINALIZED", "PAID"]},
-    })
+    }
+    if laundry_id:
+        query = scoped_query(query, laundry_id)
+    existing = await salary_slips_collection().find_one(query)
     return existing is not None
 
 
@@ -1498,6 +1549,7 @@ async def list_salary_packages(
         query["employee_id"] = employee_id
     if month:
         query["month"] = _validate_month(month)
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = salary_packages_collection().find(query).sort("month", -1)
     return [serialize(doc, ["notes"]) async for doc in cursor]
 
@@ -1509,7 +1561,8 @@ async def upsert_salary_package(
 ):
     _parse_oid(payload.employee_id, "employee")
     month = _validate_month(payload.month)
-    if await _package_locked(payload.employee_id, month):
+    laundry_id = resolve_laundry_id(current_user)
+    if await _package_locked(payload.employee_id, month, laundry_id):
         raise ConflictError("Salary for this month is already finalized for this employee")
 
     doc = {
@@ -1529,12 +1582,13 @@ async def upsert_salary_package(
         "epf_base": (payload.epf_base or "ADJUSTED").upper(),
         "salary_components": [c.model_dump() for c in payload.salary_components] if payload.salary_components else [],
         "notes": (payload.notes or "").strip() or None,
+        "laundry_id": laundry_id,
         "created_by": str(current_user.get("user_id", "")),
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
 
-    filterq = {"employee_id": payload.employee_id, "month": month}
+    filterq = scoped_query({"employee_id": payload.employee_id, "month": month}, laundry_id)
     existing = await salary_packages_collection().find_one(filterq)
     if existing:
         doc["created_at"] = existing.get("created_at", doc["created_at"])
@@ -1549,7 +1603,7 @@ async def upsert_salary_package(
         "upsert", "salary_package", str(result_id),
         details={"employee_id": payload.employee_id, "month": month},
     )
-    saved = await salary_packages_collection().find_one({"_id": result_id})
+    saved = await salary_packages_collection().find_one(owned_filter(result_id, laundry_id))
     return serialize(saved, ["notes"])
 
 
@@ -1560,10 +1614,12 @@ async def update_salary_package(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(package_id, "package")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_packages_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Salary package")
     if not existing:
         raise NotFoundError("Salary package", package_id)
-    if await _package_locked(str(existing.get("employee_id", "")), str(existing.get("month", ""))):
+    if await _package_locked(str(existing.get("employee_id", "")), str(existing.get("month", "")), laundry_id):
         raise ConflictError("Salary for this month is already finalized for this employee")
 
     updates = payload.model_dump(exclude_none=True)
@@ -1578,9 +1634,9 @@ async def update_salary_package(
         updates["salary_components"] = [c.model_dump() for c in updates["salary_components"]]
     updates["updated_at"] = datetime.now(timezone.utc)
 
-    await salary_packages_collection().update_one({"_id": oid}, {"$set": updates})
+    await salary_packages_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
     await log_audit(str(current_user.get("user_id", "")), "update", "salary_package", package_id, details={})
-    updated = await salary_packages_collection().find_one({"_id": oid})
+    updated = await salary_packages_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, ["notes"])
 
 
@@ -1590,12 +1646,14 @@ async def delete_salary_package(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(package_id, "package")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_packages_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Salary package")
     if not existing:
         raise NotFoundError("Salary package", package_id)
-    if await _package_locked(str(existing.get("employee_id", "")), str(existing.get("month", ""))):
+    if await _package_locked(str(existing.get("employee_id", "")), str(existing.get("month", "")), laundry_id):
         raise ConflictError("Salary for this month is already finalized for this employee")
-    await salary_packages_collection().delete_one({"_id": oid})
+    await salary_packages_collection().delete_one(owned_filter(oid, laundry_id))
     await log_audit(str(current_user.get("user_id", "")), "delete", "salary_package", package_id, details={})
     return {"success": True}
 
@@ -1611,5 +1669,6 @@ async def list_salaries(
     query: dict = {"employee_id": employee_id}
     if year:
         query["month"] = {"$regex": f"^{year:04d}-"}
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = salaries_collection().find(query).sort("month", -1)
     return [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]

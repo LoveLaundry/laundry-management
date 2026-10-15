@@ -5,6 +5,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query, match_stage
 from ..database.main_db import salary_advances_collection, employees_collection
 from ..models import AdvanceCreate, AdvanceUpdate, AdvanceDeduct
 from ..router_utils import serialize, log_audit
@@ -44,6 +45,7 @@ async def list_advances(
         if end_date:
             date_q["$lte"] = end_date
         query["date"] = date_q
+    query = scoped_query(query, resolve_laundry_id(current_user))
     total = await salary_advances_collection().count_documents(query)
     cursor = salary_advances_collection().find(query).sort("date", -1).skip(offset).limit(limit)
     items = [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
@@ -58,6 +60,7 @@ async def get_advance(
 ):
     oid = _parse_oid(advance_id, "advance")
     doc = await salary_advances_collection().find_one({"_id": oid})
+    assert_same_laundry(doc, resolve_laundry_id(current_user), "Advance")
     if not doc:
         raise NotFoundError("Advance", advance_id)
     return serialize(doc, SENSITIVE_FIELDS)
@@ -87,6 +90,7 @@ async def create_advance(
         "outstanding": round(payload.amount, 2),
         "status": "OUTSTANDING",
         "deductions": [],
+        "laundry_id": resolve_laundry_id(current_user),
         "created_by": str(current_user.get("user_id", "")),
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
@@ -109,7 +113,9 @@ async def update_advance(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(advance_id, "advance")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_advances_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Advance")
     if not existing:
         raise NotFoundError("Advance", advance_id)
 
@@ -124,12 +130,12 @@ async def update_advance(
     updates["updated_at"] = datetime.now(timezone.utc)
 
     if len(updates) > 1:
-        await salary_advances_collection().update_one({"_id": oid}, {"$set": updates})
+        await salary_advances_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
     await log_audit(
         str(current_user.get("user_id", "")),
         "update", "advance", advance_id, details={},
     )
-    updated = await salary_advances_collection().find_one({"_id": oid})
+    updated = await salary_advances_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, SENSITIVE_FIELDS)
 
 
@@ -140,14 +146,16 @@ async def cancel_advance(
     current_user: dict = Depends(require_capability("salary:write")),
 ):
     oid = _parse_oid(advance_id, "advance")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salary_advances_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Advance")
     if not existing:
         raise NotFoundError("Advance", advance_id)
     if existing.get("status") == "CANCELLED":
         raise ConflictError("Advance is already cancelled")
 
     await salary_advances_collection().update_one(
-        {"_id": oid},
+        owned_filter(oid, laundry_id),
         {"$set": {"status": "CANCELLED", "updated_at": datetime.now(timezone.utc)}},
     )
     await log_audit(
@@ -168,6 +176,7 @@ async def list_employee_advances(
     query: dict = {"employee_id": employee_id}
     if status:
         query["status"] = status
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = salary_advances_collection().find(query).sort("date", -1)
     return [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
 
@@ -180,6 +189,7 @@ async def employee_advances_summary(
 ):
     _parse_oid(employee_id, "employee")
     pipeline = [
+        match_stage(resolve_laundry_id(current_user)),
         {"$match": {"employee_id": employee_id, "status": "OUTSTANDING"}},
         {"$group": {"_id": None, "total_outstanding": {"$sum": "$outstanding"}, "count": {"$sum": 1}}},
     ]

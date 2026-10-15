@@ -5,6 +5,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query, match_stage
 from ..database.main_db import categories_collection, items_collection, transactions_collection
 from ..models import CategoryCreate, CategoryUpdate, ItemCreate, ItemUpdate
 from ..crypto_helper import get_search_token, encrypt_dict, decrypt_dict, encrypt_fields_for_update
@@ -30,7 +31,8 @@ def _num(value) -> float:
 async def list_categories(
     current_user: dict = Depends(require_capability("item:read")),
 ):
-    cursor = categories_collection().find({}).sort("created_at", -1)
+    query = scoped_query({}, resolve_laundry_id(current_user))
+    cursor = categories_collection().find(query).sort("created_at", -1)
     return [serialize(doc, CAT_SENSITIVE) async for doc in cursor]
 
 
@@ -45,6 +47,7 @@ async def create_category(
         "name": payload.name.strip(),
         "description": (payload.description or "").strip() or None,
         "is_active": payload.is_active,
+        "laundry_id": resolve_laundry_id(current_user),
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -64,7 +67,9 @@ async def update_category(
     oid = ObjectId(category_id) if ObjectId.is_valid(category_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Category not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await categories_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Category")
     if not existing:
         raise HTTPException(status_code=404, detail="Category not found")
     updates = payload.model_dump(exclude_none=True)
@@ -72,8 +77,8 @@ async def update_category(
         updates = encrypt_fields_for_update(existing, updates, CAT_SENSITIVE)
     updates["updated_at"] = datetime.now(timezone.utc)
     if len(updates) > 1:
-        await categories_collection().update_one({"_id": oid}, {"$set": updates})
-    updated = await categories_collection().find_one({"_id": oid})
+        await categories_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
+    updated = await categories_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, CAT_SENSITIVE)
 
 
@@ -85,10 +90,12 @@ async def delete_category(
     oid = ObjectId(category_id) if ObjectId.is_valid(category_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Category not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await categories_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Category")
     if not existing:
         raise HTTPException(status_code=404, detail="Category not found")
-    await categories_collection().update_one({"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
+    await categories_collection().update_one(owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
     await log_audit(str(current_user.get("user_id", "")), "delete", "category", category_id, details={})
     return {"success": True}
 
@@ -129,6 +136,8 @@ async def list_items(
     if search:
         query["name_search"] = get_search_token(search)
 
+    laundry_id = resolve_laundry_id(current_user)
+    query = scoped_query(query, laundry_id)
     total = await items_collection().count_documents(query)
     category_cache: dict = {}
     cursor = items_collection().find(query).sort("created_at", -1).skip(offset).limit(limit)
@@ -138,7 +147,7 @@ async def list_items(
         cid = item.get("category_id")
         if cid:
             if cid not in category_cache:
-                cat_doc = await categories_collection().find_one({"_id": ObjectId(cid)})
+                cat_doc = await categories_collection().find_one(scoped_query({"_id": ObjectId(cid)}, laundry_id))
                 category_cache[cid] = serialize(cat_doc, CAT_SENSITIVE).get("name") if cat_doc else None
             item["category_name"] = category_cache[cid]
         else:
@@ -154,8 +163,10 @@ async def create_item(
 ):
     if not payload.name.strip():
         raise BadRequestError("Item name is required")
+    laundry_id = resolve_laundry_id(current_user)
     if payload.category_id and ObjectId.is_valid(payload.category_id):
         cat_doc = await categories_collection().find_one({"_id": ObjectId(payload.category_id)})
+        assert_same_laundry(cat_doc, laundry_id, "Category")
         if not cat_doc:
             raise HTTPException(status_code=404, detail="Category not found")
 
@@ -169,6 +180,7 @@ async def create_item(
         "total_quantity": 0.0,
         "total_revenue": 0.0,
         "total_cost": 0.0,
+        "laundry_id": laundry_id,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -187,13 +199,15 @@ async def get_item(
     oid = ObjectId(item_id) if ObjectId.is_valid(item_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Item not found")
+    laundry_id = resolve_laundry_id(current_user)
     doc = await items_collection().find_one({"_id": oid})
+    assert_same_laundry(doc, laundry_id, "Item")
     if not doc:
         raise HTTPException(status_code=404, detail="Item not found")
     item = serialize(doc, ITEM_SENSITIVE)
     cid = item.get("category_id")
     if cid:
-        cat_doc = await categories_collection().find_one({"_id": ObjectId(cid)})
+        cat_doc = await categories_collection().find_one(scoped_query({"_id": ObjectId(cid)}, laundry_id))
         if cat_doc:
             item["category_name"] = serialize(cat_doc, CAT_SENSITIVE).get("name")
     return item
@@ -208,7 +222,9 @@ async def update_item(
     oid = ObjectId(item_id) if ObjectId.is_valid(item_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Item not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await items_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Item")
     if not existing:
         raise HTTPException(status_code=404, detail="Item not found")
     updates = payload.model_dump(exclude_none=True)
@@ -216,8 +232,8 @@ async def update_item(
         updates = encrypt_fields_for_update(existing, updates, ITEM_SENSITIVE)
     updates["updated_at"] = datetime.now(timezone.utc)
     if len(updates) > 1:
-        await items_collection().update_one({"_id": oid}, {"$set": updates})
-    updated = await items_collection().find_one({"_id": oid})
+        await items_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
+    updated = await items_collection().find_one(owned_filter(oid, laundry_id))
     await log_audit(str(current_user.get("user_id", "")), "update", "item", item_id, details={})
     return serialize(updated, ITEM_SENSITIVE)
 
@@ -230,9 +246,11 @@ async def delete_item(
     oid = ObjectId(item_id) if ObjectId.is_valid(item_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Item not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await items_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Item")
     if not existing:
         raise HTTPException(status_code=404, detail="Item not found")
-    await items_collection().update_one({"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
+    await items_collection().update_one(owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
     await log_audit(str(current_user.get("user_id", "")), "delete", "item", item_id, details={})
     return {"success": True}

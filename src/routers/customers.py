@@ -6,6 +6,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query, match_stage
 from ..database.main_db import (
     customers_collection,
     customer_rates_collection,
@@ -47,6 +48,7 @@ async def create_customer(
         "payment_terms": payload.payment_terms,
         "is_active": payload.is_active,
         "notes": (payload.notes or "").strip() or None,
+        "laundry_id": resolve_laundry_id(current_user),
         "created_at": now,
         "updated_at": now,
     }
@@ -73,6 +75,7 @@ async def list_customers(
     query: dict = {}
     if search:
         query["name_search"] = get_search_token(search)
+    query = scoped_query(query, resolve_laundry_id(current_user))
     total = await customers_collection().count_documents(query)
     cursor = customers_collection().find(query).sort("created_at", -1).skip(offset).limit(limit)
     items = [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
@@ -86,11 +89,13 @@ async def customer_summary(
     """Per-customer totals for the customers grid."""
     txn_sens = ["customer_name", "invoice_number", "items", "notes"]
     pay_sens = ["customer_name", "reference", "notes"]
+    laundry_id = resolve_laundry_id(current_user)
 
     # The only consumed fields (customer_id, total_amount, total_quantity) are
     # not encrypted, so aggregate server-side instead of transferring + decrypting
     # the full collections.
     txn_rows = await transactions_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {
             "_id": {"$toString": {"$ifNull": ["$customer_id", ""]}},
             "revenue": {"$sum": "$total_amount"},
@@ -110,11 +115,12 @@ async def customer_summary(
         txn_count[cid] = r.get("count") or 0
 
     pay_rows = await payments_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "amount": {"$sum": "$amount"}}},
     ]).to_list(length=None)
     paid_map: dict = {str(r.get("_id") or ""): r.get("amount") or 0 for r in pay_rows}
 
-    cursor = customers_collection().find({}).sort("created_at", -1)
+    cursor = customers_collection().find(scoped_query({}, laundry_id)).sort("created_at", -1)
     result = []
     async for doc in cursor:
         rec = serialize(doc, SENSITIVE_FIELDS)
@@ -139,6 +145,7 @@ async def get_customer(
 ):
     oid = parse_object_id(customer_id, "customer")
     doc = await customers_collection().find_one({"_id": oid})
+    assert_same_laundry(doc, resolve_laundry_id(current_user), "Customer")
     if not doc:
         raise HTTPException(status_code=404, detail="Customer not found")
     return serialize(doc, SENSITIVE_FIELDS)
@@ -151,7 +158,9 @@ async def update_customer(
     current_user: dict = Depends(require_capability("customer:write")),
 ):
     oid = parse_object_id(customer_id, "customer")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await customers_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Customer")
     if not existing:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -162,8 +171,8 @@ async def update_customer(
     updates["updated_at"] = datetime.now(timezone.utc)
 
     if len(updates) > 1:
-        await customers_collection().update_one({"_id": oid}, {"$set": updates})
-    updated = await customers_collection().find_one({"_id": oid})
+        await customers_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
+    updated = await customers_collection().find_one(owned_filter(oid, laundry_id))
     await log_audit(str(current_user.get("user_id", "")), "update", "customer", customer_id, details={"fields": list(payload.model_dump(exclude_none=True).keys())})
     return serialize(updated, SENSITIVE_FIELDS)
 
@@ -174,11 +183,13 @@ async def delete_customer(
     current_user: dict = Depends(require_capability("customer:write")),
 ):
     oid = parse_object_id(customer_id, "customer")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await customers_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Customer")
     if not existing:
         raise HTTPException(status_code=404, detail="Customer not found")
     await customers_collection().update_one(
-        {"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
+        owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
     )
     await log_audit(str(current_user.get("user_id", "")), "delete", "customer", customer_id, details={})
     return {"success": True}
@@ -191,13 +202,15 @@ async def list_customer_rates(
     current_user: dict = Depends(require_capability("customer:read")),
 ):
     oid = parse_object_id(customer_id, "customer")
-    cursor = customer_rates_collection().find({"customer_id": str(oid)})
+    laundry_id = resolve_laundry_id(current_user)
+    query = scoped_query({"customer_id": str(oid)}, laundry_id)
+    cursor = customer_rates_collection().find(query)
     items = []
     async for doc in cursor:
         item = serialize(doc, RATE_SENSITIVE_FIELDS)
         iid = item.get("item_id")
         if iid:
-            item_doc = await items_collection().find_one({"_id": ObjectId(iid)})
+            item_doc = await items_collection().find_one(scoped_query({"_id": ObjectId(iid)}, laundry_id))
             if item_doc:
                 item["item_name"] = serialize(item_doc, ["name"]).get("name")
         items.append(item)
@@ -211,11 +224,14 @@ async def add_customer_rate(
     current_user: dict = Depends(require_capability("customer:write")),
 ):
     oid = parse_object_id(customer_id, "customer")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await customers_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Customer")
     if not existing:
         raise HTTPException(status_code=404, detail="Customer not found")
     item_oid = parse_object_id(payload.item_id, "item")
     item_doc = await items_collection().find_one({"_id": item_oid})
+    assert_same_laundry(item_doc, laundry_id, "Item")
     if not item_doc:
         raise HTTPException(status_code=404, detail="Item not found")
 
@@ -225,6 +241,7 @@ async def add_customer_rate(
         "rate": payload.rate,
         "cost": payload.cost,
         "is_active": payload.is_active,
+        "laundry_id": laundry_id,
         "created_at": datetime.now(timezone.utc),
     }
     result = await customer_rates_collection().insert_one(doc)
@@ -239,7 +256,13 @@ async def delete_customer_rate(
     current_user: dict = Depends(require_capability("customer:write")),
 ):
     rate_oid = parse_object_id(rate_id, "rate")
-    result = await customer_rates_collection().delete_one({"_id": rate_oid})
+    laundry_id = resolve_laundry_id(current_user)
+    parent_oid = parse_object_id(customer_id, "customer")
+    parent = await customers_collection().find_one({"_id": parent_oid})
+    assert_same_laundry(parent, laundry_id, "Customer")
+    if not parent:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    result = await customer_rates_collection().delete_one(owned_filter(rate_oid, laundry_id))
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Rate not found")
     return {"success": True}

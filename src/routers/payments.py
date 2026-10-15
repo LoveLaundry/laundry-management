@@ -5,6 +5,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query, match_stage
 from ..database.main_db import payments_collection, customers_collection
 from ..models import PaymentCreate
 from ..crypto_helper import encrypt_dict, decrypt_dict
@@ -23,9 +24,13 @@ def _num(value) -> float:
         return 0.0
 
 
-async def _resolve_customer_name(customer_id: Optional[str], fallback: Optional[str]) -> str:
+async def _resolve_customer_name(
+    customer_id: Optional[str], fallback: Optional[str], laundry_id: str
+) -> str:
     if customer_id and ObjectId.is_valid(customer_id):
         doc = await customers_collection().find_one({"_id": ObjectId(customer_id)})
+        if laundry_id:
+            assert_same_laundry(doc, laundry_id, "Customer")
         if doc:
             name = decrypt_dict(doc, ["name", "contact_person", "phone", "email", "address", "notes"]).get("name")
             if name:
@@ -49,6 +54,7 @@ async def list_payments(
         query["payment_date"] = {"$gte": start_date}
     if end_date:
         query["payment_date"] = {**query.get("payment_date", {}), "$lte": end_date}
+    query = scoped_query(query, resolve_laundry_id(current_user))
     total = await payments_collection().count_documents(query)
     cursor = payments_collection().find(query).sort("payment_date", -1).skip(offset).limit(limit)
     items = [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
@@ -62,7 +68,8 @@ async def create_payment(
 ):
     if payload.amount <= 0:
         raise BadRequestError("Amount must be greater than zero")
-    customer_name = await _resolve_customer_name(payload.customer_id, payload.customer_name)
+    laundry_id = resolve_laundry_id(current_user)
+    customer_name = await _resolve_customer_name(payload.customer_id, payload.customer_name, laundry_id)
     if not customer_name:
         raise BadRequestError("A valid customer is required")
 
@@ -74,6 +81,7 @@ async def create_payment(
         "payment_method": payload.payment_method,
         "reference": (payload.reference or "").strip() or None,
         "notes": (payload.notes or "").strip() or None,
+        "laundry_id": laundry_id,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -92,9 +100,11 @@ async def delete_payment(
     oid = ObjectId(payment_id) if ObjectId.is_valid(payment_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Payment not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await payments_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Payment")
     if not existing:
         raise HTTPException(status_code=404, detail="Payment not found")
-    await payments_collection().delete_one({"_id": oid})
+    await payments_collection().delete_one(owned_filter(oid, laundry_id))
     await log_audit(str(current_user.get("user_id", "")), "delete", "payment", payment_id, details={})
     return {"success": True}

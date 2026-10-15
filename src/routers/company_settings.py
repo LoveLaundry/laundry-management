@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, owned_filter, resolve_laundry_id, scoped_query
 from ..database.main_db import (
     company_settings_collection,
     electricity_meter_readings_collection,
@@ -131,7 +132,10 @@ def _new_month_summary(period_start: str, period_end: str) -> dict:
 async def get_settings(
     current_user: dict = Depends(require_capability("employee:read")),
 ):
-    doc = await company_settings_collection().find_one({"key": "main"})
+    laundry_id = resolve_laundry_id(current_user)
+    doc = await company_settings_collection().find_one(
+        scoped_query({"key": "main"}, laundry_id)
+    )
     if doc:
         return {**DEFAULT_SETTINGS, **serialize(doc, [])}
     return {
@@ -145,6 +149,7 @@ async def update_settings(
     payload: CompanySettingsUpdate,
     current_user: dict = Depends(require_capability("employee:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     fields_set = payload.model_fields_set
     if ADMIN_ELECTRICITY_SETTINGS & fields_set and str(current_user.get("role", "")).upper() != "ADMIN":
         raise HTTPException(
@@ -152,7 +157,9 @@ async def update_settings(
             detail="Only an admin can configure electricity meters and their tariff slabs.",
         )
 
-    existing = await company_settings_collection().find_one({"key": "main"})
+    existing = await company_settings_collection().find_one(
+        scoped_query({"key": "main"}, laundry_id)
+    )
     updates = payload.model_dump(exclude_none=True)
     unset_fields = {}
     if "electricity_unit_slabs" in updates and payload.electricity_unit_slabs is not None:
@@ -206,7 +213,7 @@ async def update_settings(
                 )
 
     if not existing:
-        doc = {"key": "main", **DEFAULT_SETTINGS, **updates, "updated_at": datetime.now(timezone.utc)}
+        doc = {"key": "main", **DEFAULT_SETTINGS, **updates, "laundry_id": laundry_id, "updated_at": datetime.now(timezone.utc)}
         result = await company_settings_collection().insert_one(doc)
         doc["_id"] = result.inserted_id
         await log_audit(
@@ -216,16 +223,21 @@ async def update_settings(
         return serialize(doc, [])
 
     updates["updated_at"] = datetime.now(timezone.utc)
+    updates["laundry_id"] = laundry_id
     update_operation = {"$set": updates}
     if unset_fields:
         update_operation["$unset"] = unset_fields
-    await company_settings_collection().update_one({"key": "main"}, update_operation)
+    await company_settings_collection().update_one(
+        scoped_query({"key": "main"}, laundry_id), update_operation
+    )
     audit_details = {**updates, **{field: None for field in unset_fields}}
     await log_audit(
         str(current_user.get("user_id", "")),
         "update", "company_settings", "main", details=audit_details,
     )
-    updated = await company_settings_collection().find_one({"key": "main"})
+    updated = await company_settings_collection().find_one(
+        scoped_query({"key": "main"}, laundry_id)
+    )
     return {**DEFAULT_SETTINGS, **serialize(updated, [])}
 
 
@@ -234,9 +246,10 @@ async def list_electricity_meter_readings(
     limit: int = Query(100, ge=1, le=500),
     current_user: dict = Depends(require_capability("employee:read")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     cursor = (
         electricity_meter_readings_collection()
-        .find({})
+        .find(scoped_query({}, laundry_id))
         .sort("recorded_at", -1)
         .limit(limit)
     )
@@ -247,7 +260,10 @@ async def list_electricity_meter_readings(
 async def electricity_meter_analytics(
     current_user: dict = Depends(require_capability("employee:read")),
 ):
-    settings = await company_settings_collection().find_one({"key": "main"}) or {}
+    laundry_id = resolve_laundry_id(current_user)
+    settings = await company_settings_collection().find_one(
+        scoped_query({"key": "main"}, laundry_id)
+    ) or {}
     slabs_raw = settings.get("electricity_unit_slabs") or []
     tax_rate = float(settings.get("electricity_tax_rate", 0) or 0)
     start_day = clamp_start_day(settings.get("electricity_billing_cycle_start_day", 1))
@@ -258,7 +274,9 @@ async def electricity_meter_analytics(
         slabs = []
         configuration_error = str(exc)
 
-    cursor = electricity_meter_readings_collection().find({}).sort(
+    cursor = electricity_meter_readings_collection().find(
+        scoped_query({}, laundry_id)
+    ).sort(
         [("meter_id", 1), ("recorded_at", 1)]
     )
     readings = [doc async for doc in cursor]
@@ -372,12 +390,17 @@ async def electricity_meter_analytics(
 async def electricity_meter_usage(
     current_user: dict = Depends(require_capability("employee:read")),
 ):
-    settings = await company_settings_collection().find_one({"key": "main"}) or {}
+    laundry_id = resolve_laundry_id(current_user)
+    settings = await company_settings_collection().find_one(
+        scoped_query({"key": "main"}, laundry_id)
+    ) or {}
     names = {
         "meter_1": settings.get("electricity_meter_1_name") or "Meter 1",
         "meter_2": settings.get("electricity_meter_2_name") or "Meter 2",
     }
-    cursor = electricity_meter_readings_collection().find({}).sort(
+    cursor = electricity_meter_readings_collection().find(
+        scoped_query({}, laundry_id)
+    ).sort(
         [("meter_id", 1), ("recorded_at", 1)]
     )
     readings = [doc async for doc in cursor]
@@ -392,7 +415,10 @@ async def electricity_meter_projection(
     formula: str | None = Query(default=None, description="Custom pace formula preview (custom method only)"),
     current_user: dict = Depends(require_capability("employee:read")),
 ):
-    settings = await company_settings_collection().find_one({"key": "main"}) or {}
+    laundry_id = resolve_laundry_id(current_user)
+    settings = await company_settings_collection().find_one(
+        scoped_query({"key": "main"}, laundry_id)
+    ) or {}
     names = {
         "meter_1": settings.get("electricity_meter_1_name") or "Meter 1",
         "meter_2": settings.get("electricity_meter_2_name") or "Meter 2",
@@ -423,7 +449,9 @@ async def electricity_meter_projection(
             detail=str(exc),
         ) from exc
 
-    cursor = electricity_meter_readings_collection().find({}).sort(
+    cursor = electricity_meter_readings_collection().find(
+        scoped_query({}, laundry_id)
+    ).sort(
         [("meter_id", 1), ("recorded_at", 1)]
     )
     readings = [doc async for doc in cursor]
@@ -457,11 +485,15 @@ async def create_electricity_meter_reading(
             detail="Only an admin can add electricity meter readings.",
         )
 
-    settings = await company_settings_collection().find_one({"key": "main"}) or {}
+    laundry_id = resolve_laundry_id(current_user)
+    settings = await company_settings_collection().find_one(
+        scoped_query({"key": "main"}, laundry_id)
+    ) or {}
     meter_number = payload.meter_id[-1]
     meter_name = settings.get(f"electricity_meter_{meter_number}_name") or f"Meter {meter_number}"
     recorded_at_utc = payload.recorded_at.astimezone(timezone.utc)
     doc = {
+        "laundry_id": laundry_id,
         "meter_id": payload.meter_id,
         "meter_name": meter_name,
         "reading_value": payload.reading_value,
@@ -498,13 +530,10 @@ async def update_electricity_meter_reading(
             detail="Only an admin can correct electricity meter readings.",
         )
 
+    laundry_id = resolve_laundry_id(current_user)
     oid = parse_object_id(reading_id, "meter reading")
     doc = await electricity_meter_readings_collection().find_one({"_id": oid})
-    if not doc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Electricity meter reading not found.",
-        )
+    assert_same_laundry(doc, laundry_id, "Electricity meter reading")
 
     old_value = float(doc["reading_value"])
     if old_value == payload.reading_value:
@@ -522,7 +551,7 @@ async def update_electricity_meter_reading(
         "corrected_at": now,
     }
     await electricity_meter_readings_collection().update_one(
-        {"_id": oid},
+        owned_filter(oid, laundry_id),
         {
             "$set": {
                 "reading_value": payload.reading_value,
@@ -545,5 +574,5 @@ async def update_electricity_meter_reading(
             "reason": payload.reason,
         },
     )
-    updated = await electricity_meter_readings_collection().find_one({"_id": oid})
+    updated = await electricity_meter_readings_collection().find_one(owned_filter(oid, laundry_id))
     return _meter_reading_response(updated)
