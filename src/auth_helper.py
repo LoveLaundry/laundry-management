@@ -43,7 +43,7 @@ ROLE_CAPABILITIES = {
         "employee:read", "employee:write",
         "salary:read", "salary:write",
         "payment:read", "payment:write",
-        "report:read", "dashboard:read", "import:write",
+        "report:read", "report:write", "dashboard:read", "import:write",
     ],
     "MANAGER": [
         "management:read", "management:write",
@@ -54,7 +54,7 @@ ROLE_CAPABILITIES = {
         "employee:read", "employee:write",
         "salary:read", "salary:write",
         "payment:read", "payment:write",
-        "report:read", "dashboard:read", "import:write",
+        "report:read", "report:write", "dashboard:read", "import:write",
     ],
     # The counter role: takes orders, records payments, sees the day's takings.
     #
