@@ -6,6 +6,7 @@ lives in the MAIN database; SECONDARY/LOCAL are reserved for replication.
 """
 from motor.motor_asyncio import AsyncIOMotorCollection, AsyncIOMotorDatabase
 
+from ..tenant_scope import TenantScopedCollection
 from .connection_manager import get_database
 
 CLIENTS = "clients"
@@ -39,104 +40,109 @@ def _db() -> AsyncIOMotorDatabase:
     return get_database("main")
 
 
+def _coll(name: str) -> TenantScopedCollection:
+    """Every business collection is tenant-scoped; there is no raw accessor."""
+    return TenantScopedCollection(_db()[name], name)
+
+
 def clients_collection() -> AsyncIOMotorCollection:
-    return _db()[CLIENTS]
+    return _coll(CLIENTS)
 
 
 def customers_collection() -> AsyncIOMotorCollection:
-    return _db()[CUSTOMERS]
+    return _coll(CUSTOMERS)
 
 
 def customer_rates_collection() -> AsyncIOMotorCollection:
-    return _db()[CUSTOMER_RATES]
+    return _coll(CUSTOMER_RATES)
 
 
 def categories_collection() -> AsyncIOMotorCollection:
-    return _db()[CATEGORIES]
+    return _coll(CATEGORIES)
 
 
 def items_collection() -> AsyncIOMotorCollection:
-    return _db()[ITEMS]
+    return _coll(ITEMS)
 
 
 def transactions_collection() -> AsyncIOMotorCollection:
-    return _db()[TRANSACTIONS]
+    return _coll(TRANSACTIONS)
 
 
 def payments_collection() -> AsyncIOMotorCollection:
-    return _db()[PAYMENTS]
+    return _coll(PAYMENTS)
 
 
 def employees_collection() -> AsyncIOMotorCollection:
-    return _db()[EMPLOYEES]
+    return _coll(EMPLOYEES)
 
 
 def salaries_collection() -> AsyncIOMotorCollection:
-    return _db()[SALARIES]
+    return _coll(SALARIES)
 
 
 def attendance_collection() -> AsyncIOMotorCollection:
-    return _db()[ATTENDANCE]
+    return _coll(ATTENDANCE)
 
 
 def salary_advances_collection() -> AsyncIOMotorCollection:
-    return _db()[SALARY_ADVANCES]
+    return _coll(SALARY_ADVANCES)
 
 
 def salary_slips_collection() -> AsyncIOMotorCollection:
-    return _db()[SALARY_SLIPS]
+    return _coll(SALARY_SLIPS)
 
 
 def salary_packages_collection() -> AsyncIOMotorCollection:
-    return _db()[SALARY_PACKAGES]
+    return _coll(SALARY_PACKAGES)
 
 
 def holidays_collection() -> AsyncIOMotorCollection:
-    return _db()[HOLIDAYS]
+    return _coll(HOLIDAYS)
 
 
 def extra_work_categories_collection() -> AsyncIOMotorCollection:
-    return _db()[EXTRA_WORK_CATEGORIES]
+    return _coll(EXTRA_WORK_CATEGORIES)
 
 
 def extra_work_records_collection() -> AsyncIOMotorCollection:
-    return _db()[EXTRA_WORK_RECORDS]
+    return _coll(EXTRA_WORK_RECORDS)
 
 
 def company_settings_collection() -> AsyncIOMotorCollection:
-    return _db()[COMPANY_SETTINGS]
+    return _coll(COMPANY_SETTINGS)
 
 
 def electricity_meter_readings_collection() -> AsyncIOMotorCollection:
-    return _db()[ELECTRICITY_METER_READINGS]
+    return _coll(ELECTRICITY_METER_READINGS)
 
 
 def expense_categories_collection() -> AsyncIOMotorCollection:
-    return _db()[EXPENSE_CATEGORIES]
+    return _coll(EXPENSE_CATEGORIES)
 
 
 def expenses_collection() -> AsyncIOMotorCollection:
-    return _db()[EXPENSES]
+    return _coll(EXPENSES)
 
 
 def expense_templates_collection() -> AsyncIOMotorCollection:
-    return _db()[EXPENSE_TEMPLATES]
+    return _coll(EXPENSE_TEMPLATES)
 
 
 def idempotency_keys_collection() -> AsyncIOMotorCollection:
-    return _db()[IDEMPOTENCY_KEYS]
+    return _coll(IDEMPOTENCY_KEYS)
 
 
 def imports_collection() -> AsyncIOMotorCollection:
-    return _db()[IMPORTS]
+    return _coll(IMPORTS)
 
 
 def audit_logs_collection() -> AsyncIOMotorCollection:
-    return _db()[AUDIT_LOGS]
+    return _coll(AUDIT_LOGS)
 
 
 def saved_reports_collection() -> AsyncIOMotorCollection:
-    return _db()[SAVED_REPORTS]
+    return _coll(SAVED_REPORTS)
 
 
 async def ensure_indexes() -> None:

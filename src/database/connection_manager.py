@@ -1,4 +1,3 @@
-from ..tenancy import resolve_db_name
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -53,7 +52,7 @@ def _db_name_for(role: str) -> str:
 
 def get_database(role: str = ROLE_MAIN):
     client = _client_for(role)
-    return client[resolve_db_name(_db_name_for(role))]
+    return client[_db_name_for(role)]
 
 
 async def ping(role: str = ROLE_MAIN) -> bool:
