@@ -1601,15 +1601,6 @@ async def delete_salary_package(
 
 
 # ── Legacy salary compatibility ───────────────────────────────────────────
-@router.get("/employees/{employee_id}/salaries")
-async def list_salaries(
-    employee_id: str,
-    year: Optional[int] = Query(None),
-    current_user: dict = Depends(require_capability("salary:read")),
-):
-    oid = _parse_oid(employee_id, "employee")
-    query: dict = {"employee_id": employee_id}
-    if year:
-        query["month"] = {"$regex": f"^{year:04d}-"}
-    cursor = salaries_collection().find(query).sort("month", -1)
-    return [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]
+# NOTE: GET /employees/{employee_id}/salaries lives in routers/employees.py.
+# It used to be duplicated here (identical path + method), which produced a
+# duplicate OpenAPI operationId and made this copy unreachable dead code.

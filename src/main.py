@@ -3,6 +3,7 @@
 Follows the same architecture as bill_service: JWT auth from user-service,
 three-database connection manager, and encrypted sensitive fields.
 """
+from .tenancy import TenantMiddleware
 import logging
 from contextlib import asynccontextmanager
 
@@ -56,6 +57,8 @@ ALLOWED_ORIGINS = [
 
 origins = ALLOWED_ORIGINS if settings.cors_origins == ["*"] or not settings.cors_origins else settings.cors_origins
 apply_security(app, rate_limit=300)
+
+app.add_middleware(TenantMiddleware)
 
 
 @app.get("/")
