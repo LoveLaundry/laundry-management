@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -21,7 +21,7 @@ def _parse_oid(value: str, label: str = "id") -> ObjectId:
     return ObjectId(value)
 
 
-# ── List advances ──────────────────────────────────────────────────────────
+# â”€â”€ List advances â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/advances")
 async def list_advances(
     employee_id: Optional[str] = Query(None),
@@ -50,7 +50,7 @@ async def list_advances(
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
-# ── Get single advance ────────────────────────────────────────────────────
+# â”€â”€ Get single advance â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/advances/{advance_id}")
 async def get_advance(
     advance_id: str,
@@ -63,7 +63,7 @@ async def get_advance(
     return serialize(doc, SENSITIVE_FIELDS)
 
 
-# ── Create advance ────────────────────────────────────────────────────────
+# â”€â”€ Create advance â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/advances")
 async def create_advance(
     payload: AdvanceCreate,
@@ -92,8 +92,7 @@ async def create_advance(
         "updated_at": datetime.now(timezone.utc),
     }
     result = await salary_advances_collection().insert_one(doc)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "advance", str(result.inserted_id),
         details={"employee_id": payload.employee_id, "amount": payload.amount},
     )
@@ -101,7 +100,7 @@ async def create_advance(
     return serialize(doc, SENSITIVE_FIELDS)
 
 
-# ── Update advance ────────────────────────────────────────────────────────
+# â”€â”€ Update advance â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.put("/advances/{advance_id}")
 async def update_advance(
     advance_id: str,
@@ -125,15 +124,14 @@ async def update_advance(
 
     if len(updates) > 1:
         await salary_advances_collection().update_one({"_id": oid}, {"$set": updates})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "update", "advance", advance_id, details={},
     )
     updated = await salary_advances_collection().find_one({"_id": oid})
     return serialize(updated, SENSITIVE_FIELDS)
 
 
-# ── Cancel advance ────────────────────────────────────────────────────────
+# â”€â”€ Cancel advance â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.delete("/advances/{advance_id}")
 async def cancel_advance(
     advance_id: str,
@@ -150,14 +148,13 @@ async def cancel_advance(
         {"_id": oid},
         {"$set": {"status": "CANCELLED", "updated_at": datetime.now(timezone.utc)}},
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "cancel", "advance", advance_id, details={},
     )
     return {"success": True}
 
 
-# ── Get outstanding advances for an employee ──────────────────────────────
+# â”€â”€ Get outstanding advances for an employee â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/employees/{employee_id}/advances")
 async def list_employee_advances(
     employee_id: str,
@@ -172,7 +169,7 @@ async def list_employee_advances(
     return [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
 
 
-# ── Get total outstanding for an employee ─────────────────────────────────
+# â”€â”€ Get total outstanding for an employee â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/employees/{employee_id}/advances/summary")
 async def employee_advances_summary(
     employee_id: str,

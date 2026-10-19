@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -102,7 +102,7 @@ async def create_employee(
     doc["employee_code"] = f"EMP{max_emp_num + 1:03d}"
     encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
     result = await employees_collection().insert_one(encrypted)
-    await log_audit(str(current_user.get("user_id", "")), "create", "employee", str(result.inserted_id), details={"name": payload.name})
+    await log_audit(current_user, "create", "employee", str(result.inserted_id), details={"name": payload.name})
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, SENSITIVE_FIELDS)
 
@@ -148,7 +148,7 @@ async def update_employee(
     if len(updates) > 1:
         await employees_collection().update_one({"_id": oid}, {"$set": updates})
     updated = await employees_collection().find_one({"_id": oid})
-    await log_audit(str(current_user.get("user_id", "")), "update", "employee", employee_id, details={})
+    await log_audit(current_user, "update", "employee", employee_id, details={})
     return serialize(updated, SENSITIVE_FIELDS)
 
 
@@ -164,7 +164,7 @@ async def delete_employee(
     if not existing:
         raise HTTPException(status_code=404, detail="Employee not found")
     await employees_collection().update_one({"_id": oid}, {"$set": {"is_active": False, "status": "INACTIVE", "updated_at": datetime.now(timezone.utc)}})
-    await log_audit(str(current_user.get("user_id", "")), "delete", "employee", employee_id, details={})
+    await log_audit(current_user, "delete", "employee", employee_id, details={})
     return {"success": True}
 
 
@@ -183,7 +183,7 @@ async def activate_employee(
     if existing.get("leaving_date"):
         updates["leaving_date"] = None
     await employees_collection().update_one({"_id": oid}, {"$set": updates})
-    await log_audit(str(current_user.get("user_id", "")), "activate", "employee", employee_id, details={})
+    await log_audit(current_user, "activate", "employee", employee_id, details={})
     updated = await employees_collection().find_one({"_id": oid})
     return serialize(updated, SENSITIVE_FIELDS)
 
@@ -265,7 +265,7 @@ async def create_salary(
     }
     encrypted = encrypt_dict(doc, SALARY_SENSITIVE)
     result = await salaries_collection().insert_one(encrypted)
-    await log_audit(str(current_user.get("user_id", "")), "create", "salary", str(result.inserted_id), details={"employee": employee_id, "month": month_str, "net": net})
+    await log_audit(current_user, "create", "salary", str(result.inserted_id), details={"employee": employee_id, "month": month_str, "net": net})
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, SALARY_SENSITIVE)
 
@@ -313,7 +313,7 @@ async def update_salary(
     if len(updates) > 1:
         await salaries_collection().update_one({"_id": soid}, {"$set": updates})
     updated = await salaries_collection().find_one({"_id": soid})
-    await log_audit(str(current_user.get("user_id", "")), "update", "salary", salary_id, details={})
+    await log_audit(current_user, "update", "salary", salary_id, details={})
     return serialize(updated, SALARY_SENSITIVE)
 
 
@@ -368,6 +368,7 @@ async def create_attendance(
         upsert=True,
     )
     saved = await attendance_collection().find_one({"employee_id": employee_id, "date": doc["date"]})
+    await log_audit(current_user, "upsert", "attendance", str(saved.get("_id")), details={"employee_id": employee_id, "date": doc["date"], "status": doc["status"]})
     return serialize(saved, ["notes"])
 
 
@@ -389,7 +390,7 @@ async def update_attendance(
         updates["overtime_hours"] = round(float(updates["overtime_hours"]), 2)
     if len(updates) > 0:
         await attendance_collection().update_one({"_id": aoid}, {"$set": updates})
-    await log_audit(str(current_user.get("user_id", "")), "update", "attendance", attendance_id, details={})
+    await log_audit(current_user, "update", "attendance", attendance_id, details={})
     updated = await attendance_collection().find_one({"_id": aoid})
     return serialize(updated, ["notes"])
 
@@ -406,5 +407,5 @@ async def delete_attendance(
     if not existing:
         raise HTTPException(status_code=404, detail="Attendance record not found")
     await attendance_collection().delete_one({"_id": aoid})
-    await log_audit(str(current_user.get("user_id", "")), "delete", "attendance", attendance_id, details={})
+    await log_audit(current_user, "delete", "attendance", attendance_id, details={})
     return {"success": True}

@@ -70,6 +70,22 @@ ROLE_CAPABILITIES = {
         "payment:read",
         "dashboard:read",
     ],
+    # Platform operators hold a global token with no laundry membership
+    # snapshot. Historically they were denied every ADMIN endpoint, which
+    # forced support work through per-laundry impersonation. Granting the
+    # full ADMIN capability set keeps behaviour symmetric with the
+    # user-service role model without widening any single endpoint.
+    "PLATFORM_ADMIN": [
+        "management:read", "management:write",
+        "customer:read", "customer:write",
+        "item:read", "item:write",
+        "transaction:read", "transaction:write",
+        "expense:read", "expense:write",
+        "employee:read", "employee:write",
+        "salary:read", "salary:write",
+        "payment:read", "payment:write",
+        "report:read", "report:write", "dashboard:read", "import:write",
+    ],
 }
 
 

@@ -228,5 +228,6 @@ async def ensure_indexes() -> None:
 
     await audit_logs_collection().create_index("created_at", background=True)
     await audit_logs_collection().create_index([("entity_type", 1), ("entity_id", 1)], background=True)
+    await audit_logs_collection().create_index([("laundry_id", 1), ("timestamp", -1)], background=True)
 
     await saved_reports_collection().create_index([("updated_at", -1)], background=True)

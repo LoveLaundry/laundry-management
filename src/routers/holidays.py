@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -61,8 +61,7 @@ async def create_holiday(
         "created_at": datetime.now(timezone.utc),
     }
     result = await holidays_collection().insert_one(doc)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "holiday", str(result.inserted_id),
         details={"name": payload.name, "date": date_str},
     )
@@ -90,8 +89,7 @@ async def update_holiday(
 
     if len(updates) > 0:
         await holidays_collection().update_one({"_id": oid}, {"$set": updates})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "update", "holiday", holiday_id, details={},
     )
     updated = await holidays_collection().find_one({"_id": oid})
@@ -108,8 +106,7 @@ async def delete_holiday(
     if not existing:
         raise NotFoundError("Holiday", holiday_id)
     await holidays_collection().delete_one({"_id": oid})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "delete", "holiday", holiday_id, details={},
     )
     return {"success": True}

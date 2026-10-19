@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import List, Optional
 
 from bson import ObjectId
@@ -199,8 +199,7 @@ async def bulk_create_transactions(
     created = []
     for txn in payload.transactions:
         created.append(await _store_transaction(txn.model_dump(), current_user))
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "bulk_create",
         "transaction",
         None,
@@ -216,8 +215,7 @@ async def create_transaction(
     current_user: dict = Depends(require_capability("transaction:write")),
 ):
     txn = await _store_transaction(payload.model_dump(), current_user)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create",
         "transaction",
         txn["id"],
@@ -247,7 +245,7 @@ async def list_transactions(
     `limit`/`offset`. The transactions page reads `response.items` for its rows
     and `response.total` for the pager, so on an array both were `undefined` and
     `items.reduce(...)` threw "Cannot read properties of undefined (reading
-    'reduce')" — a render-time crash that the error boundary reported as a 500,
+    'reduce')" â€” a render-time crash that the error boundary reported as a 500,
     with the pager unable to page at all.
     """
     query: dict = {}
@@ -331,7 +329,7 @@ async def update_transaction(
             pass
 
     updated = await transactions_collection().find_one({"_id": oid})
-    await log_audit(str(current_user.get("user_id", "")), "update", "transaction", transaction_id, details={})
+    await log_audit(current_user, "update", "transaction", transaction_id, details={})
     return _serialize_txn(updated)
 
 
@@ -358,7 +356,7 @@ async def delete_transaction(
         except Exception:
             pass
 
-    await log_audit(str(current_user.get("user_id", "")), "delete", "transaction", transaction_id, details={})
+    await log_audit(current_user, "delete", "transaction", transaction_id, details={})
     return {"success": True}
 
 

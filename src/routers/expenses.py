@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -69,6 +69,7 @@ async def create_expense_category(
     }
     encrypted = encrypt_dict(doc, CAT_SENSITIVE)
     result = await expense_categories_collection().insert_one(encrypted)
+    await log_audit(current_user, "create", "expense_category", str(result.inserted_id), details={"name": payload.name})
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, CAT_SENSITIVE)
 
@@ -85,6 +86,7 @@ async def delete_expense_category(
     if not existing:
         raise HTTPException(status_code=404, detail="Category not found")
     await expense_categories_collection().update_one({"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
+    await log_audit(current_user, "delete", "expense_category", category_id, details={})
     return {"success": True}
 
 
@@ -174,7 +176,7 @@ async def create_expense(
     }
     encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
     result = await expenses_collection().insert_one(encrypted)
-    await log_audit(str(current_user.get("user_id", "")), "create", "expense", str(result.inserted_id), details={"amount": payload.amount, "category": category_name})
+    await log_audit(current_user, "create", "expense", str(result.inserted_id), details={"amount": payload.amount, "category": category_name})
     await idempotency.mark_processed(request, user_id, "expense", str(result.inserted_id))
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, SENSITIVE_FIELDS)
@@ -218,6 +220,7 @@ async def create_expense_template(
     }
     encrypted = encrypt_dict(doc, TEMPLATE_SENSITIVE)
     result = await expense_templates_collection().insert_one(encrypted)
+    await log_audit(current_user, "create", "expense_template", str(result.inserted_id), details={"name": payload.name})
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, TEMPLATE_SENSITIVE)
 
@@ -236,6 +239,7 @@ async def delete_expense_template(
     await expense_templates_collection().update_one(
         {"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
     )
+    await log_audit(current_user, "delete", "expense_template", template_id, details={})
     return {"success": True}
 
 
@@ -272,7 +276,7 @@ async def update_expense(
     if len(updates) > 1:
         await expenses_collection().update_one({"_id": oid}, {"$set": updates})
     updated = await expenses_collection().find_one({"_id": oid})
-    await log_audit(str(current_user.get("user_id", "")), "update", "expense", expense_id, details={})
+    await log_audit(current_user, "update", "expense", expense_id, details={})
     return serialize(updated, SENSITIVE_FIELDS)
 
 
@@ -288,5 +292,5 @@ async def delete_expense(
     if not existing:
         raise HTTPException(status_code=404, detail="Expense not found")
     await expenses_collection().delete_one({"_id": oid})
-    await log_audit(str(current_user.get("user_id", "")), "delete", "expense", expense_id, details={})
+    await log_audit(current_user, "delete", "expense", expense_id, details={})
     return {"success": True}

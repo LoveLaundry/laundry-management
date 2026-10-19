@@ -1,12 +1,14 @@
 import asyncio
 from datetime import date, datetime, timezone
 from datetime import timedelta
+from typing import Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth_helper import require_capability
 from ..database.main_db import (
+    audit_logs_collection,
     customers_collection,
     items_collection,
     categories_collection,
@@ -266,4 +268,57 @@ async def dashboard(
         "top_customers": top_customers,
         "top_items": top_items,
         "expense_breakdown": expense_breakdown,
+    }
+
+
+@router.get("/audit-logs")
+async def list_audit_logs(
+    entity_type: Optional[str] = Query(None),
+    entity_id: Optional[str] = Query(None),
+    action: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(require_capability("management:read")),
+):
+    """Tenant-scoped audit trail, admin-only.
+
+    Reads run through the tenant-scoped collection so one laundry can never
+    see another's entries; the ``laundry_id`` filter is redundant defence and
+    keeps the intent explicit. Scoping is derived from the signed token
+    (``TenantScopedCollection``), never a request parameter.
+    """
+    role = str(current_user.get("role") or "").upper()
+    from ..auth_helper import ROLE_CAPABILITIES
+    if "management:write" not in ROLE_CAPABILITIES.get(role, []):
+        raise HTTPException(status_code=403, detail="Audit log access requires an administrative role")
+
+    query: dict = {}
+    if entity_type:
+        query["$or"] = [{"entity_type": entity_type}, {"entity": entity_type}]
+    if entity_id:
+        query["entity_id"] = entity_id
+    if action:
+        query["action"] = action
+
+    collection = audit_logs_collection()
+    total = await collection.count_documents(query)
+    cursor = collection.find(query).sort("timestamp", -1).skip(offset).limit(limit)
+    items = []
+    async for doc in cursor:
+        doc.pop("_id", None)
+        doc.pop("encryption_metadata", None)
+        items.append(_serialize_audit(doc))
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+def _serialize_audit(doc: dict) -> dict:
+    ts = doc.get("timestamp") or doc.get("created_at")
+    return {
+        "auth_id": doc.get("auth_id") or doc.get("user_id"),
+        "action": doc.get("action"),
+        "entity_type": doc.get("entity_type") or doc.get("entity"),
+        "entity_id": doc.get("entity_id"),
+        "details": doc.get("details") or {},
+        "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else ts,
+        "laundry_id": doc.get("laundry_id"),
     }

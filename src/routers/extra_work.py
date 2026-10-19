@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -23,7 +23,7 @@ def _parse_oid(value: str, label: str = "id") -> ObjectId:
     return ObjectId(value)
 
 
-# ── Categories ────────────────────────────────────────────────────────────
+# â”€â”€ Categories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/extra-work/categories")
 async def list_categories(
     is_active: Optional[bool] = Query(None),
@@ -64,8 +64,7 @@ async def create_category(
         "updated_at": datetime.now(timezone.utc),
     }
     result = await extra_work_categories_collection().insert_one(doc)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "extra_work_category", str(result.inserted_id),
         details={"name": payload.name},
     )
@@ -91,8 +90,7 @@ async def update_category(
 
     if len(updates) > 1:
         await extra_work_categories_collection().update_one({"_id": oid}, {"$set": updates})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "update", "extra_work_category", category_id, details={},
     )
     updated = await extra_work_categories_collection().find_one({"_id": oid})
@@ -111,14 +109,13 @@ async def delete_category(
     await extra_work_categories_collection().update_one(
         {"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "deactivate", "extra_work_category", category_id, details={},
     )
     return {"success": True}
 
 
-# ── Records ───────────────────────────────────────────────────────────────
+# â”€â”€ Records â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/extra-work/records")
 async def list_records(
     employee_id: Optional[str] = Query(None),
@@ -181,8 +178,7 @@ async def create_record(
         "created_at": datetime.now(timezone.utc),
     }
     result = await extra_work_records_collection().insert_one(doc)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "extra_work_record", str(result.inserted_id),
         details={"employee_id": payload.employee_id, "category": cat.get("name"), "amount": amount},
     )
@@ -211,6 +207,9 @@ async def update_record(
 
     if len(updates) > 0:
         await extra_work_records_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(current_user,
+        "update", "extra_work_record", record_id, details={"fields": list(updates.keys())},
+    )
 
     updated = await extra_work_records_collection().find_one({"_id": oid})
     return serialize(updated, [])
@@ -226,8 +225,7 @@ async def delete_record(
     if not existing:
         raise NotFoundError("Extra work record", record_id)
     await extra_work_records_collection().delete_one({"_id": oid})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "delete", "extra_work_record", record_id, details={},
     )
     return {"success": True}

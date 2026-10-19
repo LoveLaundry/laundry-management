@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -79,7 +79,7 @@ async def create_payment(
     }
     encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
     result = await payments_collection().insert_one(encrypted)
-    await log_audit(str(current_user.get("user_id", "")), "create", "payment", str(result.inserted_id), details={"amount": payload.amount, "customer": customer_name})
+    await log_audit(current_user, "create", "payment", str(result.inserted_id), details={"amount": payload.amount, "customer": customer_name})
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, SENSITIVE_FIELDS)
 
@@ -96,5 +96,5 @@ async def delete_payment(
     if not existing:
         raise HTTPException(status_code=404, detail="Payment not found")
     await payments_collection().delete_one({"_id": oid})
-    await log_audit(str(current_user.get("user_id", "")), "delete", "payment", payment_id, details={})
+    await log_audit(current_user, "delete", "payment", payment_id, details={})
     return {"success": True}
