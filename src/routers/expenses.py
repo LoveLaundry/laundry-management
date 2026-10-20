@@ -5,6 +5,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query, match_stage
 from ..database.main_db import (
     expenses_collection,
     expense_categories_collection,
@@ -36,9 +37,11 @@ def _num(value) -> float:
         return 0.0
 
 
-async def _resolve_category_name(category_id: Optional[str], fallback: Optional[str]) -> Optional[str]:
+async def _resolve_category_name(category_id: Optional[str], fallback: Optional[str], laundry_id: str) -> Optional[str]:
     if category_id and ObjectId.is_valid(category_id):
-        doc = await expense_categories_collection().find_one({"_id": ObjectId(category_id)})
+        doc = await expense_categories_collection().find_one(
+            scoped_query({"_id": ObjectId(category_id)}, laundry_id)
+        )
         if doc:
             return decrypt_dict(doc, CAT_SENSITIVE).get("name") or (fallback or "").strip()
     return (fallback or "").strip() or None
@@ -49,7 +52,8 @@ async def _resolve_category_name(category_id: Optional[str], fallback: Optional[
 async def list_expense_categories(
     current_user: dict = Depends(require_capability("expense:read")),
 ):
-    cursor = expense_categories_collection().find({}).sort("created_at", -1)
+    query = scoped_query({}, resolve_laundry_id(current_user))
+    cursor = expense_categories_collection().find(query).sort("created_at", -1)
     return [serialize(doc, CAT_SENSITIVE) async for doc in cursor]
 
 
@@ -64,6 +68,7 @@ async def create_expense_category(
         "name": payload.name.strip(),
         "description": (payload.description or "").strip() or None,
         "is_active": payload.is_active,
+        "laundry_id": resolve_laundry_id(current_user),
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -82,7 +87,9 @@ async def delete_expense_category(
     oid = ObjectId(category_id) if ObjectId.is_valid(category_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Category not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await expense_categories_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Category")
     if not existing:
         raise HTTPException(status_code=404, detail="Category not found")
     await expense_categories_collection().update_one({"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
@@ -103,6 +110,8 @@ async def expenses_summary(
         query["date"] = {"$gte": start_date}
     if end_date:
         query["date"] = {**query.get("date", {}), "$lte": end_date}
+    laundry_id = resolve_laundry_id(current_user)
+    query = scoped_query(query, laundry_id)
 
     totals: dict = {}
     async for doc in expenses_collection().find(query):
@@ -115,7 +124,9 @@ async def expenses_summary(
     for cid, entry in totals.items():
         name = "Uncategorized"
         if cid != "uncategorized" and ObjectId.is_valid(cid):
-            cat_doc = await expense_categories_collection().find_one({"_id": ObjectId(cid)})
+            cat_doc = await expense_categories_collection().find_one(
+                scoped_query({"_id": ObjectId(cid)}, laundry_id)
+            )
             if cat_doc:
                 name = decrypt_dict(cat_doc, CAT_SENSITIVE).get("name") or name
         result.append({"category": name, "total": round(entry["total"], 2), "count": entry["count"]})
@@ -139,6 +150,7 @@ async def list_expenses(
         query["date"] = {**query.get("date", {}), "$lte": end_date}
     if category_id and ObjectId.is_valid(category_id):
         query["category_id"] = category_id
+    query = scoped_query(query, resolve_laundry_id(current_user))
 
     total = await expenses_collection().count_documents(query)
     cursor = expenses_collection().find(query).sort("date", -1).skip(offset).limit(limit)
@@ -160,7 +172,8 @@ async def create_expense(
 
     if payload.amount <= 0:
         raise BadRequestError("Amount must be greater than zero")
-    category_name = await _resolve_category_name(payload.category_id, payload.category_name)
+    laundry_id = resolve_laundry_id(current_user)
+    category_name = await _resolve_category_name(payload.category_id, payload.category_name, laundry_id)
     doc = {
         "date": payload.date.isoformat(),
         "category_id": payload.category_id,
@@ -171,6 +184,7 @@ async def create_expense(
         "payment_method": payload.payment_method,
         "is_recurring": payload.is_recurring,
         "notes": (payload.notes or "").strip() or None,
+        "laundry_id": laundry_id,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -190,7 +204,7 @@ async def list_expense_templates(
     """Frequently-used expense presets for one-tap entry."""
     cursor = (
         expense_templates_collection()
-        .find({"is_active": {"$ne": False}})
+        .find(scoped_query({"is_active": {"$ne": False}}, resolve_laundry_id(current_user)))
         .sort([("usage_count", -1), ("name_search", 1)])
     )
     return [serialize(doc, TEMPLATE_SENSITIVE) async for doc in cursor]
@@ -203,7 +217,8 @@ async def create_expense_template(
 ):
     if not payload.name.strip():
         raise BadRequestError("Template name is required")
-    category_name = await _resolve_category_name(payload.category_id, payload.category_name)
+    laundry_id = resolve_laundry_id(current_user)
+    category_name = await _resolve_category_name(payload.category_id, payload.category_name, laundry_id)
     now = datetime.now(timezone.utc)
     doc = {
         "name": payload.name.strip(),
@@ -215,6 +230,7 @@ async def create_expense_template(
         "payment_method": payload.payment_method,
         "usage_count": 0,
         "is_active": True,
+        "laundry_id": laundry_id,
         "created_at": now,
         "updated_at": now,
     }
@@ -233,11 +249,13 @@ async def delete_expense_template(
     oid = ObjectId(template_id) if ObjectId.is_valid(template_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Template not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await expense_templates_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Template")
     if not existing:
         raise HTTPException(status_code=404, detail="Template not found")
     await expense_templates_collection().update_one(
-        {"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
+        owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
     )
     await log_audit(current_user, "delete", "expense_template", template_id, details={})
     return {"success": True}
@@ -252,7 +270,9 @@ async def update_expense(
     oid = ObjectId(expense_id) if ObjectId.is_valid(expense_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Expense not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await expenses_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Expense")
     if not existing:
         raise HTTPException(status_code=404, detail="Expense not found")
 
@@ -268,7 +288,7 @@ async def update_expense(
         else:
             updates[key] = val
     if payload.category_name and payload.category_id:
-        updates["category_name"] = await _resolve_category_name(payload.category_id, payload.category_name)
+        updates["category_name"] = await _resolve_category_name(payload.category_id, payload.category_name, laundry_id)
     if any(k in SENSITIVE_FIELDS for k in updates):
         updates = encrypt_fields_for_update(existing, updates, SENSITIVE_FIELDS)
     updates["updated_at"] = datetime.now(timezone.utc)
@@ -288,7 +308,9 @@ async def delete_expense(
     oid = ObjectId(expense_id) if ObjectId.is_valid(expense_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Expense not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await expenses_collection().find_one({"_id": oid})
+    assert_same_laundry(existing, laundry_id, "Expense")
     if not existing:
         raise HTTPException(status_code=404, detail="Expense not found")
     await expenses_collection().delete_one({"_id": oid})

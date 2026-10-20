@@ -19,6 +19,17 @@ import pytest
 from src.routers import reports
 
 
+def _user(role: str = "ADMIN") -> dict:
+    """Session with the claims production JWTs carry post-tenancy."""
+    return {
+        "auth_id": "tester",
+        "user_id": "tester",
+        "role": role,
+        "laundry_id": "lovelaundry",
+        "laundries": [{"id": "lovelaundry", "role": role, "status": "ACTIVE"}],
+    }
+
+
 class FakeSavedReports:
     def __init__(self):
         self.document = None
@@ -61,7 +72,7 @@ async def test_daily_report_accepts_date_alias(monkeypatch):
         AsyncMock(return_value={"salary_expense_total": 40.0, "employees": [], "period_details": []}),
     )
 
-    result = await reports.daily_report(date="2026-10-10", current_user={"role": "ADMIN"})
+    result = await reports.daily_report(date="2026-10-10", current_user=_user())
 
     assert result["date"] == "2026-10-10"
     assert result["total_revenue"] == 150.0
@@ -74,21 +85,27 @@ async def test_daily_report_accepts_date_alias(monkeypatch):
 @pytest.mark.asyncio
 async def test_range_report_includes_zero_activity_days(monkeypatch):
     async def fake_dec_transactions(query):
-        if query["transaction_date"] == "2026-10-01":
+        business = query
+        if "$and" in query:
+            business = next((p for p in query["$and"] if "transaction_date" in p), {})
+        if business["transaction_date"] == "2026-10-01":
             return [{"total_amount": 100.0, "total_cost": 30.0, "total_quantity": 2.0}]
-        if query["transaction_date"] == "2026-10-03":
+        if business["transaction_date"] == "2026-10-03":
             return [{"total_amount": 80.0, "total_cost": 20.0, "total_quantity": 4.0}]
         return []
 
     async def fake_dec_expenses(query):
-        if query.get("date") == "2026-10-02":
+        business = query
+        if "$and" in query:
+            business = next((p for p in query["$and"] if "date" in p), {})
+        if business.get("date") == "2026-10-02":
             return [{"amount": 12.0}]
         return []
 
     monkeypatch.setattr(reports, "_dec_transactions", AsyncMock(side_effect=fake_dec_transactions))
     monkeypatch.setattr(reports, "_dec_expenses", AsyncMock(side_effect=fake_dec_expenses))
 
-    result = await reports.range_report("2026-10-01", "2026-10-03", current_user={"role": "ADMIN"})
+    result = await reports.range_report("2026-10-01", "2026-10-03", current_user=_user())
 
     assert result["days"] == 3
     assert result["daily"][1]["date"] == "2026-10-02"
@@ -114,7 +131,7 @@ async def test_master_report_returns_management_expenses_and_payroll(monkeypatch
     result = await reports.master_report(
         start_date="2026-10-10",
         end_date="2026-10-10",
-        current_user={"role": "ADMIN"},
+        current_user=_user(),
     )
 
     assert result["source_of_truth"] == "management_payroll_and_expenses"
@@ -165,7 +182,7 @@ async def test_saved_report_can_be_created_edited_and_deleted(monkeypatch):
     collection = FakeSavedReports()
     monkeypatch.setattr(reports, "saved_reports_collection", lambda: collection)
     monkeypatch.setattr(reports, "log_audit", AsyncMock())
-    current_user = {"user_id": "manager-1", "role": "MANAGER"}
+    current_user = _user("MANAGER")
     payload = reports.SavedReportCreate(
         title="October operations",
         start_date=date(2026, 10, 1),
@@ -223,7 +240,7 @@ async def test_hotel_and_item_wise_reports_aggregate_transactions(monkeypatch):
     monkeypatch.setattr(reports, "_report_transactions", AsyncMock(return_value=txns))
 
     hotels = await reports.hotel_wise_report(
-        start_date="2026-10-01", end_date="2026-10-31", current_user={"role": "ADMIN"}
+        start_date="2026-10-01", end_date="2026-10-31", current_user=_user()
     )
     assert len(hotels) == 1
     assert hotels[0]["client_name"] == "Sunrise Hotel"
@@ -232,7 +249,7 @@ async def test_hotel_and_item_wise_reports_aggregate_transactions(monkeypatch):
     assert hotels[0]["gross_profit"] == 1000.0
 
     items = await reports.item_wise_report(
-        start_date="2026-10-01", end_date="2026-10-31", current_user={"role": "ADMIN"}
+        start_date="2026-10-01", end_date="2026-10-31", current_user=_user()
     )
     by_name = {row["item_name"]: row for row in items}
     assert by_name["Bedsheet"]["total_quantity"] == 10

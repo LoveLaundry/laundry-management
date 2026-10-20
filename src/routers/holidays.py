@@ -5,6 +5,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, owned_filter, resolve_laundry_id, scoped_query
 from ..database.main_db import holidays_collection
 from ..models import HolidayCreate, HolidayUpdate
 from ..router_utils import serialize, log_audit
@@ -27,6 +28,7 @@ async def list_holidays(
     query: dict = {}
     if year:
         query["date"] = {"$regex": f"^{year:04d}-"}
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = holidays_collection().find(query).sort("date", 1)
     return [serialize(doc, []) async for doc in cursor]
 
@@ -38,8 +40,7 @@ async def get_holiday(
 ):
     oid = _parse_oid(holiday_id, "holiday")
     doc = await holidays_collection().find_one({"_id": oid})
-    if not doc:
-        raise NotFoundError("Holiday", holiday_id)
+    assert_same_laundry(doc, resolve_laundry_id(current_user), "Holiday")
     return serialize(doc, [])
 
 
@@ -48,12 +49,14 @@ async def create_holiday(
     payload: HolidayCreate,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     date_str = payload.date.isoformat()
-    existing = await holidays_collection().find_one({"date": date_str})
+    existing = await holidays_collection().find_one(scoped_query({"date": date_str}, laundry_id))
     if existing:
         raise ConflictError(f"A holiday already exists on {date_str}")
 
     doc = {
+        "laundry_id": laundry_id,
         "name": payload.name.strip(),
         "date": date_str,
         "description": (payload.description or "").strip() or None,
@@ -75,15 +78,17 @@ async def update_holiday(
     payload: HolidayUpdate,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(holiday_id, "holiday")
     existing = await holidays_collection().find_one({"_id": oid})
-    if not existing:
-        raise NotFoundError("Holiday", holiday_id)
+    assert_same_laundry(existing, laundry_id, "Holiday")
 
     updates = payload.model_dump(exclude_none=True)
     if "date" in updates and updates["date"] is not None:
         updates["date"] = updates["date"].isoformat() if hasattr(updates["date"], "isoformat") else updates["date"]
-        dup = await holidays_collection().find_one({"date": updates["date"], "_id": {"$ne": oid}})
+        dup = await holidays_collection().find_one(
+            scoped_query({"date": updates["date"], "_id": {"$ne": oid}}, laundry_id)
+        )
         if dup:
             raise ConflictError(f"A holiday already exists on {updates['date']}")
 
@@ -92,7 +97,7 @@ async def update_holiday(
     await log_audit(current_user,
         "update", "holiday", holiday_id, details={},
     )
-    updated = await holidays_collection().find_one({"_id": oid})
+    updated = await holidays_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, [])
 
 
@@ -101,6 +106,7 @@ async def delete_holiday(
     holiday_id: str,
     current_user: dict = Depends(require_capability("salary:write")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(holiday_id, "holiday")
     existing = await holidays_collection().find_one({"_id": oid})
     if not existing:
@@ -117,5 +123,7 @@ async def check_holiday(
     date: str,
     current_user: dict = Depends(require_capability("salary:read")),
 ):
-    doc = await holidays_collection().find_one({"date": date})
+    doc = await holidays_collection().find_one(
+        scoped_query({"date": date}, resolve_laundry_id(current_user))
+    )
     return {"is_holiday": doc is not None, "holiday": serialize(doc, []) if doc else None}

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query, match_stage
 from ..database.main_db import (
     customers_collection,
     items_collection,
@@ -140,11 +141,12 @@ def _validate_row(row: dict, row_num: int) -> dict:
     return rec
 
 
-async def _find_or_create_customer(name: str) -> str:
+async def _find_or_create_customer(name: str, laundry_id: str) -> str:
     cleaned = name.strip()
     token = get_search_token(cleaned)
-    doc = await customers_collection().find_one({"name_search": token})
+    doc = await customers_collection().find_one(scoped_query({"name_search": token}, laundry_id))
     if doc:
+        assert_same_laundry(doc, laundry_id, "Customer")
         return str(doc["_id"])
     now = datetime.now(timezone.utc)
     doc = {
@@ -153,6 +155,7 @@ async def _find_or_create_customer(name: str) -> str:
         "billing_method": "PER_ITEM",
         "payment_terms": "CASH",
         "is_active": True,
+        "laundry_id": laundry_id,
         "created_at": now,
         "updated_at": now,
     }
@@ -161,20 +164,24 @@ async def _find_or_create_customer(name: str) -> str:
     return str(result.inserted_id)
 
 
-async def _find_or_create_item(name: str) -> tuple[Optional[str], Optional[str]]:
+async def _find_or_create_item(name: str, laundry_id: str) -> tuple[Optional[str], Optional[str]]:
     cleaned = name.strip()
     token = get_search_token(cleaned)
-    doc = await items_collection().find_one({"name_search": token})
+    doc = await items_collection().find_one(scoped_query({"name_search": token}, laundry_id))
     if doc:
+        assert_same_laundry(doc, laundry_id, "Item")
         return str(doc["_id"]), doc.get("category_id")
     now = datetime.now(timezone.utc)
 
-    cat_doc = await categories_collection().find_one({"name_search": get_search_token("GENERAL")})
+    cat_doc = await categories_collection().find_one(
+        scoped_query({"name_search": get_search_token("GENERAL")}, laundry_id)
+    )
     if not cat_doc:
         cat_doc = {
             "name": "GENERAL",
             "description": "General laundry items",
             "is_active": True,
+            "laundry_id": laundry_id,
             "created_at": now,
             "updated_at": now,
         }
@@ -182,6 +189,7 @@ async def _find_or_create_item(name: str) -> tuple[Optional[str], Optional[str]]
         cat_result = await categories_collection().insert_one(cat_enc)
         cat_id = str(cat_result.inserted_id)
     else:
+        assert_same_laundry(cat_doc, laundry_id, "Category")
         cat_id = str(cat_doc["_id"])
 
     item_doc = {
@@ -194,6 +202,7 @@ async def _find_or_create_item(name: str) -> tuple[Optional[str], Optional[str]]
         "total_quantity": 0.0,
         "total_revenue": 0.0,
         "total_cost": 0.0,
+        "laundry_id": laundry_id,
         "created_at": now,
         "updated_at": now,
     }
@@ -262,6 +271,7 @@ async def execute_import(
     if not raw_rows:
         raise HTTPException(status_code=400, detail="Could not read file. Use the provided template.")
 
+    laundry_id = resolve_laundry_id(current_user)
     validated = [_validate_row(row, i) for i, row in enumerate(raw_rows, start=2)]
     valid_rows = [r for r in validated if r["valid"]]
     error_rows = [r for r in validated if not r["valid"]]
@@ -286,10 +296,10 @@ async def execute_import(
     created_count = 0
     for key in order:
         grp = groups[key]
-        customer_id = await _find_or_create_customer(grp["customer"])
+        customer_id = await _find_or_create_customer(grp["customer"], laundry_id)
         items = []
         for rec in grp["items"]:
-            item_id, cat_id = await _find_or_create_item(rec["item_name"])
+            item_id, cat_id = await _find_or_create_item(rec["item_name"], laundry_id)
             qty = rec["qty_washed"] if rec["qty_washed"] > 0 else rec["qty_received"]
             rate = rec["rate"]
             cost = rec["cost"]
@@ -312,6 +322,7 @@ async def execute_import(
             })
         now = datetime.now(timezone.utc)
         doc = {
+            "laundry_id": laundry_id,
             "transaction_date": grp["date"],
             "customer_id": customer_id,
             "customer_name": grp["customer"],
@@ -336,6 +347,7 @@ async def execute_import(
 
     # Record import batch
     import_doc = {
+        "laundry_id": laundry_id,
         "file_name": file.filename or "upload",
         "batch_id": batch_id,
         "status": "IMPORTED",
@@ -364,7 +376,7 @@ async def execute_import(
     for rec in valid_rows:
         if rec["item_name"]:
             token = get_search_token(rec["item_name"])
-            item_doc = await items_collection().find_one({"name_search": token})
+            item_doc = await items_collection().find_one(scoped_query({"name_search": token}, laundry_id))
             if item_doc:
                 from ..routers.transactions import _recompute_item_stats
                 try:
@@ -385,5 +397,5 @@ async def execute_import(
 async def import_history(
     current_user: dict = Depends(require_capability("import:write")),
 ):
-    cursor = imports_collection().find({}).sort("created_at", -1).limit(50)
+    cursor = imports_collection().find(scoped_query({}, resolve_laundry_id(current_user))).sort("created_at", -1).limit(50)
     return [serialize(doc, IMPORT_SENSITIVE) async for doc in cursor]
