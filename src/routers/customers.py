@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -54,8 +54,7 @@ async def create_customer(
     }
     encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
     result = await customers_collection().insert_one(encrypted)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create",
         "customer",
         str(result.inserted_id),
@@ -171,9 +170,9 @@ async def update_customer(
     updates["updated_at"] = datetime.now(timezone.utc)
 
     if len(updates) > 1:
-        await customers_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
-    updated = await customers_collection().find_one(owned_filter(oid, laundry_id))
-    await log_audit(str(current_user.get("user_id", "")), "update", "customer", customer_id, details={"fields": list(payload.model_dump(exclude_none=True).keys())})
+        await customers_collection().update_one({"_id": oid}, {"$set": updates})
+    updated = await customers_collection().find_one({"_id": oid})
+    await log_audit(current_user, "update", "customer", customer_id, details={"fields": list(payload.model_dump(exclude_none=True).keys())})
     return serialize(updated, SENSITIVE_FIELDS)
 
 
@@ -191,7 +190,7 @@ async def delete_customer(
     await customers_collection().update_one(
         owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
     )
-    await log_audit(str(current_user.get("user_id", "")), "delete", "customer", customer_id, details={})
+    await log_audit(current_user, "delete", "customer", customer_id, details={})
     return {"success": True}
 
 
@@ -245,6 +244,7 @@ async def add_customer_rate(
         "created_at": datetime.now(timezone.utc),
     }
     result = await customer_rates_collection().insert_one(doc)
+    await log_audit(current_user, "create", "customer_rate", str(result.inserted_id), details={"customer_id": customer_id, "item_id": payload.item_id, "rate": payload.rate})
     doc["_id"] = result.inserted_id
     return serialize(doc, RATE_SENSITIVE_FIELDS)
 
@@ -265,4 +265,5 @@ async def delete_customer_rate(
     result = await customer_rates_collection().delete_one(owned_filter(rate_oid, laundry_id))
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Rate not found")
+    await log_audit(current_user, "delete", "customer_rate", rate_id, details={"customer_id": customer_id})
     return {"success": True}

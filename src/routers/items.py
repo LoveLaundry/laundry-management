@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -53,7 +53,7 @@ async def create_category(
     }
     encrypted = encrypt_dict(doc, CAT_SENSITIVE)
     result = await categories_collection().insert_one(encrypted)
-    await log_audit(str(current_user.get("user_id", "")), "create", "category", str(result.inserted_id), details={"name": payload.name})
+    await log_audit(current_user, "create", "category", str(result.inserted_id), details={"name": payload.name})
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, CAT_SENSITIVE)
 
@@ -77,8 +77,9 @@ async def update_category(
         updates = encrypt_fields_for_update(existing, updates, CAT_SENSITIVE)
     updates["updated_at"] = datetime.now(timezone.utc)
     if len(updates) > 1:
-        await categories_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
-    updated = await categories_collection().find_one(owned_filter(oid, laundry_id))
+        await categories_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(current_user, "update", "category", category_id, details={"fields": list(updates.keys())})
+    updated = await categories_collection().find_one({"_id": oid})
     return serialize(updated, CAT_SENSITIVE)
 
 
@@ -95,8 +96,8 @@ async def delete_category(
     assert_same_laundry(existing, laundry_id, "Category")
     if not existing:
         raise HTTPException(status_code=404, detail="Category not found")
-    await categories_collection().update_one(owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
-    await log_audit(str(current_user.get("user_id", "")), "delete", "category", category_id, details={})
+    await categories_collection().update_one({"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
+    await log_audit(current_user, "delete", "category", category_id, details={})
     return {"success": True}
 
 
@@ -186,7 +187,7 @@ async def create_item(
     }
     encrypted = encrypt_dict(doc, ITEM_SENSITIVE)
     result = await items_collection().insert_one(encrypted)
-    await log_audit(str(current_user.get("user_id", "")), "create", "item", str(result.inserted_id), details={"name": payload.name})
+    await log_audit(current_user, "create", "item", str(result.inserted_id), details={"name": payload.name})
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, ITEM_SENSITIVE)
 
@@ -232,9 +233,9 @@ async def update_item(
         updates = encrypt_fields_for_update(existing, updates, ITEM_SENSITIVE)
     updates["updated_at"] = datetime.now(timezone.utc)
     if len(updates) > 1:
-        await items_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
-    updated = await items_collection().find_one(owned_filter(oid, laundry_id))
-    await log_audit(str(current_user.get("user_id", "")), "update", "item", item_id, details={})
+        await items_collection().update_one({"_id": oid}, {"$set": updates})
+    updated = await items_collection().find_one({"_id": oid})
+    await log_audit(current_user, "update", "item", item_id, details={})
     return serialize(updated, ITEM_SENSITIVE)
 
 
@@ -251,6 +252,6 @@ async def delete_item(
     assert_same_laundry(existing, laundry_id, "Item")
     if not existing:
         raise HTTPException(status_code=404, detail="Item not found")
-    await items_collection().update_one(owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
-    await log_audit(str(current_user.get("user_id", "")), "delete", "item", item_id, details={})
+    await items_collection().update_one({"_id": oid}, {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}})
+    await log_audit(current_user, "delete", "item", item_id, details={})
     return {"success": True}

@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import io
 import uuid
 from datetime import date as date_type
@@ -365,8 +365,7 @@ async def execute_import(
     batch_enc = encrypt_dict(import_doc, IMPORT_SENSITIVE)
     await imports_collection().insert_one(batch_enc)
 
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "import",
         "historical_data",
         batch_id,

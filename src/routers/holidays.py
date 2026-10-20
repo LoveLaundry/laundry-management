@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -64,8 +64,7 @@ async def create_holiday(
         "created_at": datetime.now(timezone.utc),
     }
     result = await holidays_collection().insert_one(doc)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "holiday", str(result.inserted_id),
         details={"name": payload.name, "date": date_str},
     )
@@ -94,9 +93,8 @@ async def update_holiday(
             raise ConflictError(f"A holiday already exists on {updates['date']}")
 
     if len(updates) > 0:
-        await holidays_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+        await holidays_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(current_user,
         "update", "holiday", holiday_id, details={},
     )
     updated = await holidays_collection().find_one(owned_filter(oid, laundry_id))
@@ -111,10 +109,10 @@ async def delete_holiday(
     laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(holiday_id, "holiday")
     existing = await holidays_collection().find_one({"_id": oid})
-    assert_same_laundry(existing, laundry_id, "Holiday")
-    await holidays_collection().delete_one(owned_filter(oid, laundry_id))
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    if not existing:
+        raise NotFoundError("Holiday", holiday_id)
+    await holidays_collection().delete_one({"_id": oid})
+    await log_audit(current_user,
         "delete", "holiday", holiday_id, details={},
     )
     return {"success": True}

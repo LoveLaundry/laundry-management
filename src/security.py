@@ -34,11 +34,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.limit = requests_per_minute
         self._buckets: dict[str, list[float]] = {}
+        self._last_prune = time.time()
 
     async def dispatch(self, request: Request, call_next):
         key = request.client.host if request.client else "unknown"
         now = time.time()
         window_start = now - 60.0
+        # Drop idle keys periodically; otherwise the dict keeps one entry per
+        # distinct client IP for the process lifetime (unbounded memory growth).
+        if now - self._last_prune >= 60.0:
+            pruned = {}
+            for bucket_key, stamps in self._buckets.items():
+                live = [t for t in stamps if t >= window_start]
+                if live:
+                    pruned[bucket_key] = live
+            self._buckets = pruned
+            self._last_prune = now
         hits = [t for t in self._buckets.get(key, []) if t >= window_start]
         self._buckets[key] = hits
         if len(hits) >= self.limit:
@@ -62,6 +73,12 @@ def apply_security(app: FastAPI, rate_limit: int = 300, origins: list[str] | Non
 
     if origins is None:
         origins = settings.cors_origins
+    # Order matters: Starlette runs the most recently added middleware first.
+    # CORS is added LAST so it wraps the rate limiter and the security headers —
+    # otherwise a 429 short-circuits before CORS and the browser reports the
+    # rejected request as a CORS failure instead of a rate limit.
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
@@ -69,5 +86,3 @@ def apply_security(app: FastAPI, rate_limit: int = 300, origins: list[str] | Non
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(SecurityHeadersMiddleware)
-    app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit)

@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Laundry Management & Historical Records", version="1.0.0", lifespan=lifespan)
 
 from .security import apply_security
+from .tenant_scope import TenantClaimsMiddleware
 
 CACHEABLE_PATH_PREFIXES = ("/api/customers", "/api/items", "/api/salary/slips")
 
@@ -51,11 +52,15 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
     "https://lovelaundry-manager.vercel.app",
+
+    "https://system-lovelaundry-lk.vercel.app",
     "https://public.lovelaundry.lk",
 ]
 
 origins = ALLOWED_ORIGINS if settings.cors_origins == ["*"] or not settings.cors_origins else settings.cors_origins
 apply_security(app, rate_limit=300, origins=origins)
+app.add_middleware(TenantClaimsMiddleware)
+
 
 
 @app.get("/")

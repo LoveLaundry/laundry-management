@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import calendar
 from datetime import date as date_cls, datetime, timezone
 from typing import Optional
@@ -50,7 +50,7 @@ def _num(value) -> float:
         return 0.0
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 DEFAULT_SETTINGS = {
     "company_name": "Love Laundry",
     "working_days_per_week": 6,
@@ -224,7 +224,7 @@ async def _prefetch_payroll_data(
     }
 
 
-# ── Generic Period Salary Calculation ─────────────────────────────────────
+# â”€â”€ Generic Period Salary Calculation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async def _calculate_period_salary(
     emp: dict,
     emp_decrypted: dict,
@@ -242,7 +242,7 @@ async def _calculate_period_salary(
     prefetched maps instead of issuing per-employee database queries.
 
     When ``full_attendance`` is True every working day counts as attended,
-    regardless of what has been recorded so far — used to project what the
+    regardless of what has been recorded so far â€” used to project what the
     month would pay out if all employees attend all remaining days.
     """
     employee_id = str(emp["_id"])
@@ -582,7 +582,7 @@ async def _calculate_period_salary(
     }
 
 
-# ── Salary Calculation Endpoint (monthly) ─────────────────────────────────
+# â”€â”€ Salary Calculation Endpoint (monthly) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/salary/calculate")
 @router.get("/salary/calculate")
 async def calculate_salary(
@@ -604,7 +604,7 @@ async def calculate_salary(
     return await _calculate_period_salary(emp, emp_decrypted, start_date, end_date, period_type="MONTHLY", laundry_id=laundry_id)
 
 
-# ── Period / Weekly Salary Calculation ────────────────────────────────────
+# â”€â”€ Period / Weekly Salary Calculation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/salary/calculate-period")
 @router.get("/salary/calculate-period")
 async def calculate_period_salary(
@@ -624,9 +624,12 @@ async def calculate_period_salary(
     return await _calculate_period_salary(emp, emp_decrypted, period_start, period_end, period_type=period_type, laundry_id=laundry_id)
 
 
-# ── Generate / Save Salary Slip ───────────────────────────────────────────
-async def _find_overlapping_slip(employee_id: str, start_str: str, end_str: str, laundry_id: str) -> Optional[dict]:
-    query = {
+# â”€â”€ Generate / Save Salary Slip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async def _find_overlapping_slip(employee_id: str, start_str: str, end_str: str) -> Optional[dict]:
+    """Return the first non-cancelled/deleted slip whose date range overlaps
+    [start_str, end_str] for the same employee. Prevents the same date from
+    being paid more than once (e.g. weekly slip + custom range slip)."""
+    return await salary_slips_collection().find_one({
         "employee_id": employee_id,
         "status": {"$nin": ["CANCELLED", "DELETED"]},
         "period_start": {"$lte": end_str},
@@ -842,8 +845,7 @@ async def create_salary_slip(
                     {"$set": {"status": "FULLY_DEDUCTED", "outstanding": 0, "updated_at": datetime.now(timezone.utc)}},
                 )
 
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "salary_slip", str(result.inserted_id),
         details={"employee_id": payload.employee_id, "period": period_start_str, "net": net_salary, "slip_number": slip_number},
     )
@@ -852,7 +854,7 @@ async def create_salary_slip(
     return serialize(doc, SALARY_SENSITIVE)
 
 
-# ── List salary slips ─────────────────────────────────────────────────────
+# â”€â”€ List salary slips â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/salary/slips")
 async def list_salary_slips(
     employee_id: Optional[str] = Query(None),
@@ -885,7 +887,7 @@ async def list_salary_slips(
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
-# ── Get single salary slip ────────────────────────────────────────────────
+# â”€â”€ Get single salary slip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/salary/slips/{slip_id}")
 async def get_salary_slip(
     slip_id: str,
@@ -899,7 +901,7 @@ async def get_salary_slip(
     return serialize(doc, SALARY_SENSITIVE)
 
 
-# ── Update salary slip ────────────────────────────────────────────────────
+# â”€â”€ Update salary slip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.put("/salary/slips/{slip_id}")
 async def update_salary_slip(
     slip_id: str,
@@ -960,16 +962,15 @@ async def update_salary_slip(
     updates["net_salary"] = net_salary
     updates["updated_at"] = datetime.now(timezone.utc)
 
-    await salary_slips_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await salary_slips_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(current_user,
         "update", "salary_slip", slip_id, details={"net": net_salary},
     )
     updated = await salary_slips_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, SALARY_SENSITIVE)
 
 
-# ── Finalize salary slip ──────────────────────────────────────────────────
+# â”€â”€ Finalize salary slip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/salary/slips/{slip_id}/finalize")
 async def finalize_salary_slip(
     slip_id: str,
@@ -992,14 +993,13 @@ async def finalize_salary_slip(
         owned_filter(oid, laundry_id),
         {"$set": {"status": "FINALIZED", "updated_at": datetime.now(timezone.utc)}},
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "finalize", "salary_slip", slip_id, details={},
     )
     return {"success": True, "status": "FINALIZED"}
 
 
-# ── Cancel salary slip ────────────────────────────────────────────────────
+# â”€â”€ Cancel salary slip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/salary/slips/{slip_id}/cancel")
 async def cancel_salary_slip(
     slip_id: str,
@@ -1033,14 +1033,13 @@ async def cancel_salary_slip(
         owned_filter(oid, laundry_id),
         {"$set": {"status": "CANCELLED", "updated_at": datetime.now(timezone.utc)}},
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "cancel", "salary_slip", slip_id, details={},
     )
     return {"success": True, "status": "CANCELLED"}
 
 
-# ── Delete salary slip (soft delete — only cancelled slips) ────────────────
+# â”€â”€ Delete salary slip (soft delete â€” only cancelled slips) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.delete("/salary/slips/{slip_id}")
 async def delete_salary_slip(
     slip_id: str,
@@ -1065,14 +1064,13 @@ async def delete_salary_slip(
             "updated_at": datetime.now(timezone.utc),
         }},
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "delete", "salary_slip", slip_id, details={},
     )
     return {"success": True, "status": "DELETED"}
 
 
-# ── Mark salary slip as paid ──────────────────────────────────────────────
+# â”€â”€ Mark salary slip as paid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/salary/slips/{slip_id}/pay")
 async def mark_salary_paid(
     slip_id: str,
@@ -1101,14 +1099,13 @@ async def mark_salary_paid(
             "updated_at": datetime.now(timezone.utc),
         }},
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "pay", "salary_slip", slip_id, details={"amount": amount},
     )
     return {"success": True}
 
 
-# ── Salary history summary for an employee ────────────────────────────────
+# â”€â”€ Salary history summary for an employee â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/employees/{employee_id}/salary-history")
 async def employee_salary_history(
     employee_id: str,
@@ -1123,7 +1120,7 @@ async def employee_salary_history(
     return [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]
 
 
-# ── Attendance bulk set ───────────────────────────────────────────────────
+# â”€â”€ Attendance bulk set â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/attendance/bulk")
 async def bulk_set_attendance(
     employee_id: str = Query(...),
@@ -1156,10 +1153,11 @@ async def bulk_set_attendance(
             upsert=True,
         )
         count += 1
+    await log_audit(current_user, "bulk-set", "attendance", employee_id, details={"dates": dates, "status": status, "count": count})
     return {"success": True, "count": count}
 
 
-# ── Attendance bulk set for a single day (all employees in one table) ──────
+# â”€â”€ Attendance bulk set for a single day (all employees in one table) â”€â”€â”€â”€â”€â”€
 @router.post("/attendance/bulk-day")
 async def bulk_day_attendance(
     payload: AttendanceBulkDay,
@@ -1205,12 +1203,12 @@ async def bulk_day_attendance(
             upsert=True,
         )
         count += 1
-    await log_audit(str(current_user.get("user_id", "")), "bulk-set", "attendance", None, details={"date": date_str, "count": count})
+    await log_audit(current_user, "bulk-set", "attendance", None, details={"date": date_str, "count": count})
     await idempotency.mark_processed(request, user_id, "attendance_bulk_day", date_str)
     return {"success": True, "count": count}
 
 
-# ── General attendance listing ─────────────────────────────────────────────
+# â”€â”€ General attendance listing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/attendance")
 async def list_attendance_range(
     employee_id: Optional[str] = Query(None),
@@ -1233,7 +1231,7 @@ async def list_attendance_range(
     return [serialize(doc, ["notes"]) async for doc in cursor]
 
 
-# ── Attendance summary (mirrors the salary engine) ─────────────────────────
+# â”€â”€ Attendance summary (mirrors the salary engine) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/attendance/summary")
 async def attendance_summary(
     employee_id: str = Query(...),
@@ -1342,7 +1340,7 @@ async def attendance_summary(
     }
 
 
-# ── Payroll preview (all active employees for a month) ─────────────────────
+# â”€â”€ Payroll preview (all active employees for a month) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/salary/payroll-preview")
 async def payroll_preview(
     year: int = Query(...),
@@ -1409,7 +1407,7 @@ async def payroll_preview(
     }
 
 
-# ── Run payroll (create DRAFT slips for all employees missing one) ─────────
+# â”€â”€ Run payroll (create DRAFT slips for all employees missing one) â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/salary/payroll-run")
 async def run_payroll(
     year: int = Query(...),
@@ -1503,15 +1501,14 @@ async def run_payroll(
             else:
                 failed.append(value)
 
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "run_payroll", "salary_slip", None,
         details={"year": year, "month": month, "created": len(created), "skipped": len(skipped), "failed": len(failed)},
     )
     return {"created": created, "count": len(created), "skipped": skipped, "failed": failed}
 
 
-# ── Salary package overrides (per-month arrangement) ─────────────────────
+# â”€â”€ Salary package overrides (per-month arrangement) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _validate_month(value: str) -> str:
     parts = str(value or "").split("-")
     if len(parts) != 2 or len(parts[0]) != 4 or len(parts[1]) != 2:
@@ -1598,8 +1595,7 @@ async def upsert_salary_package(
         result = await salary_packages_collection().insert_one(doc)
         result_id = result.inserted_id
 
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "upsert", "salary_package", str(result_id),
         details={"employee_id": payload.employee_id, "month": month},
     )
@@ -1634,9 +1630,9 @@ async def update_salary_package(
         updates["salary_components"] = [c.model_dump() for c in updates["salary_components"]]
     updates["updated_at"] = datetime.now(timezone.utc)
 
-    await salary_packages_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
-    await log_audit(str(current_user.get("user_id", "")), "update", "salary_package", package_id, details={})
-    updated = await salary_packages_collection().find_one(owned_filter(oid, laundry_id))
+    await salary_packages_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(current_user, "update", "salary_package", package_id, details={})
+    updated = await salary_packages_collection().find_one({"_id": oid})
     return serialize(updated, ["notes"])
 
 
@@ -1653,22 +1649,12 @@ async def delete_salary_package(
         raise NotFoundError("Salary package", package_id)
     if await _package_locked(str(existing.get("employee_id", "")), str(existing.get("month", "")), laundry_id):
         raise ConflictError("Salary for this month is already finalized for this employee")
-    await salary_packages_collection().delete_one(owned_filter(oid, laundry_id))
-    await log_audit(str(current_user.get("user_id", "")), "delete", "salary_package", package_id, details={})
+    await salary_packages_collection().delete_one({"_id": oid})
+    await log_audit(current_user, "delete", "salary_package", package_id, details={})
     return {"success": True}
 
 
-# ── Legacy salary compatibility ───────────────────────────────────────────
-@router.get("/employees/{employee_id}/salaries")
-async def list_salaries(
-    employee_id: str,
-    year: Optional[int] = Query(None),
-    current_user: dict = Depends(require_capability("salary:read")),
-):
-    oid = _parse_oid(employee_id, "employee")
-    query: dict = {"employee_id": employee_id}
-    if year:
-        query["month"] = {"$regex": f"^{year:04d}-"}
-    query = scoped_query(query, resolve_laundry_id(current_user))
-    cursor = salaries_collection().find(query).sort("month", -1)
-    return [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]
+# â”€â”€ Legacy salary compatibility â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# NOTE: GET /employees/{employee_id}/salaries lives in routers/employees.py.
+# It used to be duplicated here (identical path + method), which produced a
+# duplicate OpenAPI operationId and made this copy unreachable dead code.

@@ -1,4 +1,4 @@
-import calendar
+﻿import calendar
 from datetime import date as date_type
 from datetime import datetime, timezone
 from datetime import timedelta
@@ -87,7 +87,7 @@ def _num(value) -> float:
 
 
 def _today() -> str:
-    """Today on the Sri Lankan clock — the day the staff actually work."""
+    """Today on the Sri Lankan clock â€” the day the staff actually work."""
     return today_str()
 
 
@@ -324,7 +324,7 @@ async def _dec_expenses(query: dict) -> list:
             result.append(serialize(doc, EXPENSE_SENSITIVE))
         except (ValueError, KeyError):
             # A single undecryptable expense must not silently vanish from the
-            # financial reports — that understates expenses and overstates
+            # financial reports â€” that understates expenses and overstates
             # profit. Fall back to the raw fields (minus crypto metadata) so the
             # amount still counts, matching _dec_transactions.
             result.append({
@@ -787,8 +787,7 @@ async def create_saved_report(
     doc["laundry_id"] = laundry_id
     result = await saved_reports_collection().insert_one(doc)
     doc["_id"] = result.inserted_id
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create",
         "saved_report",
         str(result.inserted_id),
@@ -839,10 +838,9 @@ async def update_saved_report(
 
     updates["updated_by"] = str(current_user.get("user_id") or current_user.get("user_name") or "")
     updates["updated_at"] = datetime.now(timezone.utc)
-    await saved_reports_collection().update_one(_owned(oid, laundry_id), {"$set": updates})
-    updated = await saved_reports_collection().find_one(_owned(oid, laundry_id))
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await saved_reports_collection().update_one({"_id": oid}, {"$set": updates})
+    updated = await saved_reports_collection().find_one({"_id": oid})
+    await log_audit(current_user,
         "update",
         "saved_report",
         report_id,
@@ -867,7 +865,7 @@ async def delete_saved_report(
     result = await saved_reports_collection().delete_one(_owned(oid, laundry_id))
     if not result.deleted_count:
         raise HTTPException(status_code=404, detail="Saved report not found.")
-    await log_audit(str(current_user.get("user_id", "")), "delete", "saved_report", report_id)
+    await log_audit(current_user, "delete", "saved_report", report_id)
     return {"deleted": True, "id": report_id}
 
 
@@ -876,8 +874,7 @@ async def outstanding_report(
     current_user: dict = Depends(require_capability("report:read")),
 ):
     billed_map: dict = {}
-    laundry_id = _resolve_laundry(current_user)
-    # Only customer_id / customer_name / total_amount are consumed — project them
+    # Only customer_id / customer_name / total_amount are consumed â€” project them
     # (plus encryption_metadata so customer_name can be decrypted) instead of
     # transferring full documents with their (large) encrypted items arrays.
     txn_cursor = transactions_collection().find(_scope({}, laundry_id), {

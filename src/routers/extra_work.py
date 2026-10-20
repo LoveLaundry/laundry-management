@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -24,7 +24,7 @@ def _parse_oid(value: str, label: str = "id") -> ObjectId:
     return ObjectId(value)
 
 
-# ── Categories ────────────────────────────────────────────────────────────
+# â”€â”€ Categories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/extra-work/categories")
 async def list_categories(
     is_active: Optional[bool] = Query(None),
@@ -66,8 +66,7 @@ async def create_category(
         "updated_at": datetime.now(timezone.utc),
     }
     result = await extra_work_categories_collection().insert_one(doc)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "extra_work_category", str(result.inserted_id),
         details={"name": payload.name},
     )
@@ -92,9 +91,8 @@ async def update_category(
     updates["updated_at"] = datetime.now(timezone.utc)
 
     if len(updates) > 1:
-        await extra_work_categories_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
-    await log_audit(
-        str(current_user.get("user_id", "")),
+        await extra_work_categories_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(current_user,
         "update", "extra_work_category", category_id, details={},
     )
     updated = await extra_work_categories_collection().find_one(owned_filter(oid, laundry_id))
@@ -113,14 +111,13 @@ async def delete_category(
     await extra_work_categories_collection().update_one(
         owned_filter(oid, laundry_id), {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "deactivate", "extra_work_category", category_id, details={},
     )
     return {"success": True}
 
 
-# ── Records ───────────────────────────────────────────────────────────────
+# â”€â”€ Records â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/extra-work/records")
 async def list_records(
     employee_id: Optional[str] = Query(None),
@@ -184,8 +181,7 @@ async def create_record(
         "created_at": datetime.now(timezone.utc),
     }
     result = await extra_work_records_collection().insert_one(doc)
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create", "extra_work_record", str(result.inserted_id),
         details={"employee_id": payload.employee_id, "category": cat.get("name"), "amount": amount},
     )
@@ -213,7 +209,10 @@ async def update_record(
         updates["units"] = round(float(updates["units"]), 2)
 
     if len(updates) > 0:
-        await extra_work_records_collection().update_one(owned_filter(oid, laundry_id), {"$set": updates})
+        await extra_work_records_collection().update_one({"_id": oid}, {"$set": updates})
+    await log_audit(current_user,
+        "update", "extra_work_record", record_id, details={"fields": list(updates.keys())},
+    )
 
     updated = await extra_work_records_collection().find_one(owned_filter(oid, laundry_id))
     return serialize(updated, [])
@@ -227,10 +226,10 @@ async def delete_record(
     laundry_id = resolve_laundry_id(current_user)
     oid = _parse_oid(record_id, "record")
     existing = await extra_work_records_collection().find_one({"_id": oid})
-    assert_same_laundry(existing, laundry_id, "Extra work record")
-    await extra_work_records_collection().delete_one(owned_filter(oid, laundry_id))
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    if not existing:
+        raise NotFoundError("Extra work record", record_id)
+    await extra_work_records_collection().delete_one({"_id": oid})
+    await log_audit(current_user,
         "delete", "extra_work_record", record_id, details={},
     )
     return {"success": True}

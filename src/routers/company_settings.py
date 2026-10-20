@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
+﻿from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -216,8 +216,7 @@ async def update_settings(
         doc = {"key": "main", **DEFAULT_SETTINGS, **updates, "laundry_id": laundry_id, "updated_at": datetime.now(timezone.utc)}
         result = await company_settings_collection().insert_one(doc)
         doc["_id"] = result.inserted_id
-        await log_audit(
-            str(current_user.get("user_id", "")),
+        await log_audit(current_user,
             "create", "company_settings", "main", details=updates,
         )
         return serialize(doc, [])
@@ -231,8 +230,7 @@ async def update_settings(
         scoped_query({"key": "main"}, laundry_id), update_operation
     )
     audit_details = {**updates, **{field: None for field in unset_fields}}
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "update", "company_settings", "main", details=audit_details,
     )
     updated = await company_settings_collection().find_one(
@@ -503,8 +501,7 @@ async def create_electricity_meter_reading(
     }
     result = await electricity_meter_readings_collection().insert_one(doc)
     doc["_id"] = result.inserted_id
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "create",
         "electricity_meter_reading",
         str(result.inserted_id),
@@ -561,8 +558,7 @@ async def update_electricity_meter_reading(
             "$push": {"corrections": new_correction},
         },
     )
-    await log_audit(
-        str(current_user.get("user_id", "")),
+    await log_audit(current_user,
         "update",
         "electricity_meter_reading",
         str(oid),
