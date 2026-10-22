@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, laundry_match, owned_filter, resolve_laundry_id, scoped_query
 from ..database.main_db import customers_collection, items_collection, transactions_collection
 from ..models import TransactionCreate, TransactionUpdate
 from ..crypto_helper import get_search_token, encrypt_dict, decrypt_dict
@@ -38,7 +39,7 @@ def _billed_qty(item: dict) -> float:
     return _num(item.get("quantity_received"))
 
 
-async def _build_item(item: dict, source: str) -> dict:
+async def _build_item(item: dict, source: str, laundry_id: str | None = None) -> dict:
     """Resolve item name/category from item_id and compute line totals."""
     item_name = (item.get("item_name") or "").strip()
     category_name = (item.get("category_name") or "").strip() or None
@@ -46,6 +47,8 @@ async def _build_item(item: dict, source: str) -> dict:
 
     if item_id and ObjectId.is_valid(item_id):
         item_doc = await items_collection().find_one({"_id": ObjectId(item_id)})
+        if laundry_id:
+            assert_same_laundry(item_doc, laundry_id, "Item")
         if item_doc:
             dec = decrypt_dict(item_doc, ["name"])
             if not item_name:
@@ -87,9 +90,13 @@ async def _build_item(item: dict, source: str) -> dict:
     }
 
 
-async def _resolve_customer_name(customer_id: Optional[str], fallback: Optional[str]) -> str:
+async def _resolve_customer_name(
+    customer_id: Optional[str], fallback: Optional[str], laundry_id: str | None = None
+) -> str:
     if customer_id and ObjectId.is_valid(customer_id):
         doc = await customers_collection().find_one({"_id": ObjectId(customer_id)})
+        if laundry_id:
+            assert_same_laundry(doc, laundry_id, "Customer")
         if doc:
             dec = decrypt_dict(doc, ["name", "contact_person", "phone", "email", "address", "notes"])
             return dec.get("name") or (fallback or "").strip()
@@ -120,6 +127,16 @@ async def _recompute_item_stats(item_id: str):
     )
 
 
+async def _owned_transaction(transaction_id: str, current_user: dict):
+    laundry_id = resolve_laundry_id(current_user)
+    oid = parse_oid(transaction_id, "transaction")
+    doc = await transactions_collection().find_one({"_id": oid})
+    assert_same_laundry(doc, laundry_id, "Transaction")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return laundry_id, oid, doc
+
+
 def _serialize_txn(doc: dict) -> dict:
     try:
         txn = serialize(doc, SENSITIVE_FIELDS)
@@ -133,13 +150,13 @@ def _serialize_txn(doc: dict) -> dict:
     return txn
 
 
-async def _store_transaction(txn: dict, current_user: dict) -> dict:
+async def _store_transaction(txn: dict, current_user: dict, laundry_id: str) -> dict:
     """Encrypt and insert a single transaction document."""
     items = []
     for raw_item in txn.get("items", []):
-        items.append(await _build_item(raw_item, txn.get("source") or "MANUAL"))
+        items.append(await _build_item(raw_item, txn.get("source") or "MANUAL", laundry_id))
 
-    customer_name = await _resolve_customer_name(txn.get("customer_id"), txn.get("customer_name"))
+    customer_name = await _resolve_customer_name(txn.get("customer_id"), txn.get("customer_name"), laundry_id)
     if not customer_name:
         raise BadRequestError("A valid customer is required")
 
@@ -152,6 +169,7 @@ async def _store_transaction(txn: dict, current_user: dict) -> dict:
     raw_date = txn.get("transaction_date") or now.date().isoformat()
     txn_date = raw_date.isoformat() if hasattr(raw_date, "isoformat") else str(raw_date)
     doc = {
+        "laundry_id": laundry_id,
         "transaction_date": txn_date,
         "customer_id": txn.get("customer_id"),
         "customer_name": customer_name,
@@ -260,6 +278,7 @@ async def list_transactions(
     if source:
         query["source"] = source.upper()
 
+    query = scoped_query(query, resolve_laundry_id(current_user))
     total = await transactions_collection().count_documents(query)
     cursor = (
         transactions_collection()
@@ -277,10 +296,7 @@ async def get_transaction(
     transaction_id: str,
     current_user: dict = Depends(require_capability("transaction:read")),
 ):
-    oid = parse_oid(transaction_id, "transaction")
-    doc = await transactions_collection().find_one({"_id": oid})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+    _, _, doc = await _owned_transaction(transaction_id, current_user)
     return _serialize_txn(doc)
 
 
@@ -290,10 +306,7 @@ async def update_transaction(
     payload: TransactionUpdate,
     current_user: dict = Depends(require_capability("transaction:write")),
 ):
-    oid = parse_oid(transaction_id, "transaction")
-    existing = await transactions_collection().find_one({"_id": oid})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+    laundry_id, oid, existing = await _owned_transaction(transaction_id, current_user)
 
     old = _serialize_txn(await transactions_collection().find_one({"_id": oid}))
     data = payload.model_dump(exclude_none=True)
@@ -312,7 +325,9 @@ async def update_transaction(
         updates["customer_name"] = (updates["customer_name"] or "").strip()
     updates["updated_at"] = datetime.now(timezone.utc)
 
-    await transactions_collection().update_one({"_id": oid}, {"$set": updates})
+    await transactions_collection().update_one(
+        {"_id": oid, **laundry_match(laundry_id)}, {"$set": updates}
+    )
 
     # Refresh rollups for old + new items
     affected = set()
@@ -338,13 +353,10 @@ async def delete_transaction(
     transaction_id: str,
     current_user: dict = Depends(require_capability("transaction:write")),
 ):
-    oid = parse_oid(transaction_id, "transaction")
-    existing = await transactions_collection().find_one({"_id": oid})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Transaction not found")
+    laundry_id, oid, existing = await _owned_transaction(transaction_id, current_user)
 
     old = _serialize_txn(existing)
-    await transactions_collection().delete_one({"_id": oid})
+    await transactions_collection().delete_one({"_id": oid, **laundry_match(laundry_id)})
 
     affected = set()
     for it in (old.get("items") or []):

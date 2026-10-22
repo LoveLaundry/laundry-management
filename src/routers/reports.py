@@ -11,6 +11,14 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import (
+    assert_same_laundry,
+    laundry_match,
+    owned_filter,
+    resolve_laundry_id,
+    scoped_query,
+    match_stage,
+)
 from ..database.main_db import (
     employees_collection,
     customers_collection,
@@ -38,6 +46,20 @@ EXPENSE_SENSITIVE = ["description", "reference", "notes"]
 SALARY_SENSITIVE = ["notes"]
 
 MASTER_FINANCIALS_SOURCE = "management_payroll_and_expenses"
+
+
+def _resolve_laundry(current_user: dict) -> str:
+    """Tenant of this session — fail closed when the session has none."""
+    return resolve_laundry_id(current_user)
+
+
+def _scope(query: dict, laundry_id: str) -> dict:
+    """AND the tenant clause onto a report filter."""
+    return scoped_query(query, laundry_id)
+
+
+def _owned(oid, laundry_id: str) -> dict:
+    return owned_filter(oid, laundry_id)
 
 
 class SavedReportCreate(BaseModel):
@@ -146,12 +168,17 @@ def _prorate_monthly_salary(calculation: dict, month_days: int, covered_days: in
     return calculation
 
 
-async def _salary_expense_summary(start: date_type, end: date_type) -> dict:
+async def _salary_expense_summary(
+    start: date_type, end: date_type, laundry_id: str
+) -> dict:
     """Calculate employee payroll accruals using the payroll engine."""
     from .salary import _calculate_period_salary, _prefetch_payroll_data
 
     employees = []
-    cursor = employees_collection().find({"is_active": {"$ne": False}, "status": {"$ne": "INACTIVE"}})
+    employees_query = _scope(
+        {"is_active": {"$ne": False}, "status": {"$ne": "INACTIVE"}}, laundry_id
+    )
+    cursor = employees_collection().find(employees_query)
     async for raw_employee in cursor:
         try:
             employee = decrypt_dict(raw_employee, ["name", "phone", "nic", "notes"])
@@ -171,7 +198,9 @@ async def _salary_expense_summary(start: date_type, end: date_type) -> dict:
         period_start_str = period_start.isoformat()
         period_end_str = period_end.isoformat()
         employee_ids = [str(raw["_id"]) for raw, _ in employees]
-        preloaded = await _prefetch_payroll_data(employee_ids, period_start_str, period_end_str)
+        preloaded = await _prefetch_payroll_data(
+            employee_ids, period_start_str, period_end_str, laundry_id=laundry_id
+        )
 
         for raw_employee, employee in employees:
             joined = _normalize_gate_pass_date(employee.get("joined_date"))
@@ -186,6 +215,7 @@ async def _salary_expense_summary(start: date_type, end: date_type) -> dict:
                 period_end_str,
                 period_type="REPORT",
                 preloaded=preloaded,
+                laundry_id=laundry_id,
             )
             effective_start = _normalize_gate_pass_date(calculation.get("effective_start")) or period_start
             effective_end = _normalize_gate_pass_date(calculation.get("effective_end")) or period_end
@@ -251,12 +281,17 @@ async def _salary_expense_summary(start: date_type, end: date_type) -> dict:
     }
 
 
-async def _master_report_data(start_date: str, end_date: str) -> dict:
-    expenses = await _dec_expenses({"date": {"$gte": start_date, "$lte": end_date}})
+async def _master_report_data(
+    start_date: str, end_date: str, laundry_id: str
+) -> dict:
+    expenses = await _dec_expenses(
+        _scope({"date": {"$gte": start_date, "$lte": end_date}}, laundry_id)
+    )
     other_expenses = round(sum(_num(e.get("amount")) for e in expenses), 2)
     payroll = await _salary_expense_summary(
         date_type.fromisoformat(start_date),
         date_type.fromisoformat(end_date),
+        laundry_id=laundry_id,
     )
     total_expenses = round(other_expenses + payroll["salary_expense_total"], 2)
     return {
@@ -372,8 +407,12 @@ def _summaries_from_transactions(txns: list) -> tuple[list, list]:
     return hotel_rows, item_rows
 
 
-async def _report_transactions(start_date: str, end_date: str) -> list:
-    return await _dec_transactions({"transaction_date": {"$gte": start_date, "$lte": end_date}})
+async def _report_transactions(
+    start_date: str, end_date: str, laundry_id: str
+) -> list:
+    return await _dec_transactions(
+        _scope({"transaction_date": {"$gte": start_date, "$lte": end_date}}, laundry_id)
+    )
 
 
 @router.get("/reports/profit-loss")
@@ -391,13 +430,14 @@ async def profit_loss_report(
     if customer_id and ObjectId.is_valid(customer_id):
         query["customer_id"] = customer_id
 
-    txns = await _dec_transactions(query)
+    laundry_id = _resolve_laundry(current_user)
+    txns = await _dec_transactions(_scope(query, laundry_id))
     exp_query: dict = {}
     if start_date:
         exp_query["date"] = {"$gte": start_date}
     if end_date:
         exp_query["date"] = {**exp_query.get("date", {}), "$lte": end_date}
-    expenses = await _dec_expenses(exp_query)
+    expenses = await _dec_expenses(_scope(exp_query, laundry_id))
 
     total_revenue = round(sum(_num(t.get("total_amount")) for t in txns), 2)
     total_cogs = round(sum(_num(t.get("total_cost")) for t in txns), 2)
@@ -431,14 +471,20 @@ async def profit_loss_report(
             name = cid
             if cid != "uncategorized" and ObjectId.is_valid(cid):
                 if cid not in cat_cache:
-                    cat_doc = await categories_collection().find_one({"_id": ObjectId(cid)})
+                    cat_doc = await categories_collection().find_one(
+                        _scope({"_id": ObjectId(cid)}, laundry_id)
+                    )
                     cat_cache[cid] = decrypt_dict(cat_doc, CAT_SENSITIVE).get("name") if cat_doc else cid
                 name = cat_cache[cid]
             elif key and ObjectId.is_valid(key):
                 if key not in cat_cache:
-                    item_doc = await items_collection().find_one({"_id": ObjectId(key)})
+                    item_doc = await items_collection().find_one(
+                        _scope({"_id": ObjectId(key)}, laundry_id)
+                    )
                     if item_doc and item_doc.get("category_id"):
-                        cat_doc = await categories_collection().find_one({"_id": ObjectId(item_doc["category_id"])})
+                        cat_doc = await categories_collection().find_one(
+                            _scope({"_id": ObjectId(item_doc["category_id"])}, laundry_id)
+                        )
                         cat_cache[key] = decrypt_dict(cat_doc, CAT_SENSITIVE).get("name") if cat_doc else "Uncategorized"
                     else:
                         cat_cache[key] = it.get("category_name") or "Uncategorized"
@@ -458,7 +504,9 @@ async def profit_loss_report(
         cid = e.get("category_id") or "Uncategorized"
         name = cid
         if cid != "Uncategorized" and ObjectId.is_valid(cid):
-            cat_doc = await expense_categories_collection().find_one({"_id": ObjectId(cid)})
+            cat_doc = await expense_categories_collection().find_one(
+                _scope({"_id": ObjectId(cid)}, laundry_id)
+            )
             name = decrypt_dict(cat_doc, CAT_SENSITIVE).get("name") if cat_doc else "Uncategorized"
         by_exp_cat[name] = by_exp_cat.get(name, 0.0) + _num(e.get("amount"))
     expenses_by_category = [
@@ -490,15 +538,17 @@ async def daily_report(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.") from exc
 
-    txns = await _dec_transactions({"transaction_date": selected_date})
+    laundry_id = _resolve_laundry(current_user)
+    txns = await _dec_transactions(_scope({"transaction_date": selected_date}, laundry_id))
     total_qty = round(sum(_num(t.get("total_quantity")) for t in txns), 2)
     revenue = round(sum(_num(t.get("total_amount")) for t in txns), 2)
     cogs = round(sum(_num(t.get("total_cost")) for t in txns), 2)
-    expenses = await _dec_expenses({"date": selected_date})
+    expenses = await _dec_expenses(_scope({"date": selected_date}, laundry_id))
     other_expenses = round(sum(_num(e.get("amount")) for e in expenses), 2)
     payroll = await _salary_expense_summary(
         date_type.fromisoformat(selected_date),
         date_type.fromisoformat(selected_date),
+        laundry_id=laundry_id,
     )
     total_expenses = round(other_expenses + payroll["salary_expense_total"], 2)
     net_profit = round(revenue - cogs - total_expenses, 2)
@@ -534,6 +584,7 @@ async def range_report(
     if end < start:
         raise HTTPException(status_code=400, detail="end_date must be on or after start_date.")
 
+    laundry_id = _resolve_laundry(current_user)
     daily_rows = []
     total_revenue = 0.0
     total_cogs = 0.0
@@ -543,8 +594,8 @@ async def range_report(
     current = start
     while current <= end:
         current_str = current.isoformat()
-        txns = await _dec_transactions({"transaction_date": current_str})
-        expenses = await _dec_expenses({"date": current_str})
+        txns = await _dec_transactions(_scope({"transaction_date": current_str}, laundry_id))
+        expenses = await _dec_expenses(_scope({"date": current_str}, laundry_id))
 
         daily_revenue = round(sum(_num(t.get("total_amount")) for t in txns), 2)
         daily_cogs = round(sum(_num(t.get("total_cost")) for t in txns), 2)
@@ -596,15 +647,17 @@ async def monthly_report(
         end = f"{year:04d}-{month + 1:02d}-01"
 
     query = {"transaction_date": {"$gte": start, "$lt": end}}
-    txns = await _dec_transactions(query)
+    laundry_id = _resolve_laundry(current_user)
+    txns = await _dec_transactions(_scope(query, laundry_id))
     total_qty = round(sum(_num(t.get("total_quantity")) for t in txns), 2)
     revenue = round(sum(_num(t.get("total_amount")) for t in txns), 2)
     cogs = round(sum(_num(t.get("total_cost")) for t in txns), 2)
-    expenses = await _dec_expenses({"date": {"$gte": start, "$lt": end}})
+    expenses = await _dec_expenses(_scope({"date": {"$gte": start, "$lt": end}}, laundry_id))
     other_expenses = round(sum(_num(e.get("amount")) for e in expenses), 2)
     payroll = await _salary_expense_summary(
         date_type.fromisoformat(start),
         date_type.fromisoformat(end) - timedelta(days=1),
+        laundry_id=laundry_id,
     )
     total_expenses = round(other_expenses + payroll["salary_expense_total"], 2)
 
@@ -653,7 +706,9 @@ async def master_report(
     if end < start:
         raise HTTPException(status_code=400, detail="end_date must be on or after start_date.")
 
-    return await _master_report_data(start.isoformat(), end.isoformat())
+    return await _master_report_data(
+        start.isoformat(), end.isoformat(), laundry_id=_resolve_laundry(current_user)
+    )
 
 
 @router.get("/reports/hotel-wise")
@@ -665,7 +720,9 @@ async def hotel_wise_report(
     if not start_date or not end_date:
         raise HTTPException(status_code=400, detail="Both start_date and end_date are required.")
 
-    txns = await _report_transactions(start_date, end_date)
+    txns = await _report_transactions(
+        start_date, end_date, laundry_id=_resolve_laundry(current_user)
+    )
     hotel_summary, _ = _summaries_from_transactions(txns)
     return hotel_summary
 
@@ -679,7 +736,9 @@ async def item_wise_report(
     if not start_date or not end_date:
         raise HTTPException(status_code=400, detail="Both start_date and end_date are required.")
 
-    txns = await _report_transactions(start_date, end_date)
+    txns = await _report_transactions(
+        start_date, end_date, laundry_id=_resolve_laundry(current_user)
+    )
     _, item_summary = _summaries_from_transactions(txns)
     return item_summary
 
@@ -694,7 +753,9 @@ def _serialize_saved_report(doc: dict) -> dict:
 async def list_saved_reports(
     current_user: dict = Depends(require_capability("report:read")),
 ):
-    cursor = saved_reports_collection().find({}).sort("updated_at", -1).limit(100)
+    cursor = saved_reports_collection().find(
+        _scope({}, _resolve_laundry(current_user))
+    ).sort("updated_at", -1).limit(100)
     return [_serialize_saved_report(doc) async for doc in cursor]
 
 
@@ -722,6 +783,8 @@ async def create_saved_report(
         "updated_by": str(current_user.get("user_id") or current_user.get("user_name") or ""),
         "updated_at": now,
     }
+    laundry_id = _resolve_laundry(current_user)
+    doc["laundry_id"] = laundry_id
     result = await saved_reports_collection().insert_one(doc)
     doc["_id"] = result.inserted_id
     await log_audit(current_user,
@@ -742,9 +805,11 @@ async def update_saved_report(
     if not ObjectId.is_valid(report_id):
         raise HTTPException(status_code=404, detail="Saved report not found.")
     oid = ObjectId(report_id)
-    existing = await saved_reports_collection().find_one({"_id": oid})
+    laundry_id = _resolve_laundry(current_user)
+    existing = await saved_reports_collection().find_one(_owned(oid, laundry_id))
     if not existing:
         raise HTTPException(status_code=404, detail="Saved report not found.")
+    assert_same_laundry(existing, laundry_id, "Saved report")
 
     updates = payload.model_dump(exclude_unset=True)
     for key in ("title", "start_date", "end_date"):
@@ -791,7 +856,13 @@ async def delete_saved_report(
 ):
     if not ObjectId.is_valid(report_id):
         raise HTTPException(status_code=404, detail="Saved report not found.")
-    result = await saved_reports_collection().delete_one({"_id": ObjectId(report_id)})
+    oid = ObjectId(report_id)
+    laundry_id = _resolve_laundry(current_user)
+    existing = await saved_reports_collection().find_one(_owned(oid, laundry_id))
+    if not existing:
+        raise HTTPException(status_code=404, detail="Saved report not found.")
+    assert_same_laundry(existing, laundry_id, "Saved report")
+    result = await saved_reports_collection().delete_one(_owned(oid, laundry_id))
     if not result.deleted_count:
         raise HTTPException(status_code=404, detail="Saved report not found.")
     await log_audit(current_user, "delete", "saved_report", report_id)
@@ -806,7 +877,7 @@ async def outstanding_report(
     # Only customer_id / customer_name / total_amount are consumed â€” project them
     # (plus encryption_metadata so customer_name can be decrypted) instead of
     # transferring full documents with their (large) encrypted items arrays.
-    txn_cursor = transactions_collection().find({}, {
+    txn_cursor = transactions_collection().find(_scope({}, laundry_id), {
         "customer_id": 1, "customer_name": 1, "total_amount": 1, "encryption_metadata": 1,
     })
 
@@ -822,9 +893,11 @@ async def outstanding_report(
         billed_map[cid]["billed"] += _num(t.get("total_amount"))
         billed_map[cid]["name"] = t.get("customer_name") or billed_map[cid]["name"]
 
-    paid_rows = await payments_collection().aggregate([
-        {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "amount": {"$sum": "$amount"}}},
-    ]).to_list(length=None)
+    payment_pipeline: list = [match_stage(laundry_id)]
+    payment_pipeline.append(
+        {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "amount": {"$sum": "$amount"}}}
+    )
+    paid_rows = await payments_collection().aggregate(payment_pipeline).to_list(length=None)
     paid_map: dict = {str(r.get("_id") or ""): r.get("amount") or 0.0 for r in paid_rows}
 
     result = []
@@ -878,12 +951,13 @@ async def data_quality_report(
     if end < start:
         raise HTTPException(status_code=400, detail="end_date must be on or after start_date.")
 
+    laundry_id = _resolve_laundry(current_user)
     missing_days = []
     current = start
     while current <= end:
         current_str = current.isoformat()
-        txns = await _dec_transactions({"transaction_date": current_str})
-        expenses = await _dec_expenses({"date": current_str})
+        txns = await _dec_transactions(_scope({"transaction_date": current_str}, laundry_id))
+        expenses = await _dec_expenses(_scope({"date": current_str}, laundry_id))
         if not txns and not expenses:
             missing_days.append(current_str)
         current += timedelta(days=1)

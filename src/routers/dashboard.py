@@ -7,6 +7,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import match_stage, owned_filter, resolve_laundry_id, scoped_query
 from ..database.main_db import (
     audit_logs_collection,
     customers_collection,
@@ -60,9 +61,10 @@ def _str_key(value) -> str:
     return str(value)
 
 
-async def _txn_by_date() -> dict:
+async def _txn_by_date(laundry_id: str) -> dict:
     """Map date -> {amount, qty} for all transactions (server-side aggregation)."""
     rows = await transactions_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {"_id": "$transaction_date", "amount": {"$sum": "$total_amount"}, "qty": {"$sum": "$total_quantity"}}}
     ]).to_list(length=None)
     out = {}
@@ -72,9 +74,10 @@ async def _txn_by_date() -> dict:
     return out
 
 
-async def _exp_by_date() -> dict:
+async def _exp_by_date(laundry_id: str) -> dict:
     """Map date -> amount for all expenses (server-side aggregation)."""
     rows = await expenses_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {"_id": "$date", "amount": {"$sum": "$amount"}}}
     ]).to_list(length=None)
     out = {}
@@ -83,43 +86,47 @@ async def _exp_by_date() -> dict:
     return out
 
 
-async def _billed_by_customer() -> dict:
+async def _billed_by_customer(laundry_id: str) -> dict:
     rows = await transactions_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "amount": {"$sum": "$total_amount"}}}
     ]).to_list(length=None)
     return {str(r.get("_id") or ""): r.get("amount") or 0 for r in rows}
 
 
-async def _paid_by_customer() -> dict:
+async def _paid_by_customer(laundry_id: str) -> dict:
     rows = await payments_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "amount": {"$sum": "$amount"}}}
     ]).to_list(length=None)
     return {str(r.get("_id") or ""): r.get("amount") or 0 for r in rows}
 
 
-async def _customer_revenue_top6() -> list:
+async def _customer_revenue_top6(laundry_id: str) -> list:
     """Top 6 customers by aggregate revenue (server-side)."""
     return await transactions_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {"_id": {"$toString": {"$ifNull": ["$customer_id", ""]}}, "revenue": {"$sum": "$total_amount"}}},
         {"$sort": {"revenue": -1}},
         {"$limit": 6},
     ]).to_list(length=None)
 
 
-async def _expense_breakdown_rows() -> list:
+async def _expense_breakdown_rows(laundry_id: str) -> list:
     """Top 6 expense categories by aggregate amount (server-side)."""
     return await expenses_collection().aggregate([
+        match_stage(laundry_id),
         {"$group": {"_id": {"$ifNull": ["$category_id", "Uncategorized"]}, "amount": {"$sum": "$amount"}}},
         {"$sort": {"amount": -1}},
         {"$limit": 6},
     ]).to_list(length=None)
 
 
-async def _top_items() -> dict:
+async def _top_items(laundry_id: str) -> dict:
     """Top items by revenue. `items` is encrypted per-document, so it must be
     projected and decrypted in Python — only the needed column is transferred."""
     by_item: dict = {}
-    cursor = transactions_collection().find({}, {"items": 1})
+    cursor = transactions_collection().find(scoped_query({}, laundry_id), {"items": 1})
     async for doc in cursor:
         if "items" not in doc:
             continue
@@ -137,10 +144,12 @@ async def _top_items() -> dict:
     return by_item
 
 
-async def _outstanding_advances_sum() -> float:
+async def _outstanding_advances_sum(laundry_id: str) -> float:
     """Sum of positive outstanding balances across OUTSTANDING advances."""
     total = 0.0
-    async for a in salary_advances_collection().find({"status": "OUTSTANDING"}, {"outstanding": 1}):
+    async for a in salary_advances_collection().find(
+        scoped_query({"status": "OUTSTANDING"}, laundry_id), {"outstanding": 1}
+    ):
         amt = _num(a.get("outstanding"))
         if amt > 0:
             total += amt
@@ -151,6 +160,7 @@ async def _outstanding_advances_sum() -> float:
 async def dashboard(
     current_user: dict = Depends(require_capability("dashboard:read")),
 ):
+    laundry_id = resolve_laundry_id(current_user)
     today = _today()
     month_prefix = this_month()
     six_months_ago = add_months(date.fromisoformat(today), -6).isoformat()
@@ -160,26 +170,26 @@ async def dashboard(
     (txn_by_date, exp_by_date, billed_map, paid_map, customer_rows, exp_rows,
      by_item, att_today, active_employees, total_customers,
      draft_slips_month, unpaid_slips_month, outstanding_advances) = await asyncio.gather(
-        _txn_by_date(),
-        _exp_by_date(),
-        _billed_by_customer(),
-        _paid_by_customer(),
-        _customer_revenue_top6(),
-        _expense_breakdown_rows(),
-        _top_items(),
-        attendance_collection().find({"date": today}).to_list(length=None),
-        employees_collection().count_documents({"is_active": True}),
-        customers_collection().count_documents({}),
-        salary_slips_collection().count_documents({
+        _txn_by_date(laundry_id),
+        _exp_by_date(laundry_id),
+        _billed_by_customer(laundry_id),
+        _paid_by_customer(laundry_id),
+        _customer_revenue_top6(laundry_id),
+        _expense_breakdown_rows(laundry_id),
+        _top_items(laundry_id),
+        attendance_collection().find(scoped_query({"date": today}, laundry_id)).to_list(length=None),
+        employees_collection().count_documents(scoped_query({"is_active": True}, laundry_id)),
+        customers_collection().count_documents(scoped_query({}, laundry_id)),
+        salary_slips_collection().count_documents(scoped_query({
             "period_start": {"$regex": f"^{month_prefix}"},
             "status": "DRAFT",
-        }),
-        salary_slips_collection().count_documents({
+        }, laundry_id)),
+        salary_slips_collection().count_documents(scoped_query({
             "period_start": {"$regex": f"^{month_prefix}"},
             "status": {"$in": ["FINALIZED", "PAID"]},
             "paid": {"$ne": True},
-        }),
-        _outstanding_advances_sum(),
+        }, laundry_id)),
+        _outstanding_advances_sum(laundry_id),
     )
 
     today_revenue = round(_num(txn_by_date.get(today, {}).get("amount")), 2)
@@ -215,7 +225,7 @@ async def dashboard(
         if cid and cid not in name_cache:
             name_cache[cid] = None
             if ObjectId.is_valid(cid):
-                cust = await customers_collection().find_one({"_id": ObjectId(cid)})
+                cust = await customers_collection().find_one(owned_filter(ObjectId(cid), laundry_id))
                 if cust:
                     try:
                         name_cache[cid] = decrypt_dict(cust, CUSTOMER_SENSITIVE).get("name")
@@ -239,7 +249,7 @@ async def dashboard(
         if isinstance(cid, (ObjectId,)) or (isinstance(cid, str) and ObjectId.is_valid(cid)):
             key = str(cid)
             if key not in cat_name_cache:
-                cat = await expense_categories_collection().find_one({"_id": ObjectId(cid)})
+                cat = await expense_categories_collection().find_one(owned_filter(ObjectId(cid), laundry_id))
                 cat_name_cache[key] = decrypt_dict(cat, CAT_SENSITIVE).get("name") if cat else None
             name = cat_name_cache.get(key) or str(cid)
         expense_breakdown.append({"category": name, "amount": round(r.get("amount") or 0, 2)})

@@ -5,6 +5,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..auth_helper import require_capability
+from ..tenancy import assert_same_laundry, owned_filter, resolve_laundry_id, scoped_query
 from ..database.main_db import employees_collection, salaries_collection, attendance_collection
 from ..models import EmployeeCreate, EmployeeUpdate, SalaryCreate, SalaryUpdate, AttendanceCreate, AttendanceUpdate
 from ..crypto_helper import encrypt_dict, decrypt_dict, get_search_token, encrypt_fields_for_update
@@ -34,6 +35,7 @@ async def list_employees(
     query: dict = {}
     if search:
         query["name_search"] = get_search_token(search)
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = employees_collection().find(query).sort("created_at", -1)
     return [serialize(doc, SENSITIVE_FIELDS) async for doc in cursor]
 
@@ -47,8 +49,7 @@ async def get_employee(
     if not oid:
         raise HTTPException(status_code=404, detail="Employee not found")
     doc = await employees_collection().find_one({"_id": oid})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    assert_same_laundry(doc, resolve_laundry_id(current_user), "Employee")
     return serialize(doc, SENSITIVE_FIELDS)
 
 
@@ -59,7 +60,9 @@ async def create_employee(
 ):
     if not payload.name.strip():
         raise BadRequestError("Employee name is required")
+    laundry_id = resolve_laundry_id(current_user)
     doc = {
+        "laundry_id": laundry_id,
         "name": payload.name.strip(),
         "position": (payload.position or "").strip() or None,
         "department": payload.department,
@@ -86,12 +89,16 @@ async def create_employee(
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
-    existing_doc = await employees_collection().find_one({"name_search": get_search_token(payload.name.strip())})
+    existing_doc = await employees_collection().find_one(
+        scoped_query({"name_search": get_search_token(payload.name.strip())}, laundry_id)
+    )
     if existing_doc:
         return {"detail": "Employee already exists"}
 
     max_emp_num = 0
-    cursor = employees_collection().find({"employee_code": {"$regex": "^EMP\\d+$"}}, {"employee_code": 1})
+    cursor = employees_collection().find(
+        scoped_query({"employee_code": {"$regex": "^EMP\\d+$"}}, laundry_id), {"employee_code": 1}
+    )
     async for c in cursor:
         try:
             n = int(c.get("employee_code", "EMP000")[3:])
@@ -116,9 +123,9 @@ async def update_employee(
     oid = ObjectId(employee_id) if ObjectId.is_valid(employee_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Employee not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await employees_collection().find_one({"_id": oid})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    assert_same_laundry(existing, laundry_id, "Employee")
     data = payload.model_dump(exclude_none=True)
     updates = {}
     for key, val in data.items():
@@ -160,6 +167,7 @@ async def delete_employee(
     oid = ObjectId(employee_id) if ObjectId.is_valid(employee_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Employee not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await employees_collection().find_one({"_id": oid})
     if not existing:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -176,9 +184,9 @@ async def activate_employee(
     oid = ObjectId(employee_id) if ObjectId.is_valid(employee_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Employee not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await employees_collection().find_one({"_id": oid})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    assert_same_laundry(existing, laundry_id, "Employee")
     updates: dict = {"is_active": True, "status": "ACTIVE", "updated_at": datetime.now(timezone.utc)}
     if existing.get("leaving_date"):
         updates["leaving_date"] = None
@@ -209,6 +217,7 @@ async def list_salaries(
     query: dict = {"employee_id": employee_id}
     if year:
         query["month"] = {"$regex": f"^{year:04d}-"}
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = salaries_collection().find(query).sort("month", -1)
     return [serialize(doc, SALARY_SENSITIVE) async for doc in cursor]
 
@@ -222,12 +231,14 @@ async def create_salary(
     oid = ObjectId(employee_id) if ObjectId.is_valid(employee_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Employee not found")
+    laundry_id = resolve_laundry_id(current_user)
     emp = await employees_collection().find_one({"_id": oid})
-    if not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    assert_same_laundry(emp, laundry_id, "Employee")
 
     month_str = _payroll_month(payload.month, payload.year)
-    existing = await salaries_collection().find_one({"employee_id": employee_id, "month": month_str})
+    existing = await salaries_collection().find_one(
+        scoped_query({"employee_id": employee_id, "month": month_str}, laundry_id)
+    )
     if existing:
         raise ConflictError(f"Salary already recorded for {month_str}")
 
@@ -241,6 +252,7 @@ async def create_salary(
     amount_paid = payload.amount_paid if payload.amount_paid else net
 
     doc = {
+        "laundry_id": laundry_id,
         "employee_id": employee_id,
         "employee_name": decrypt_dict(emp, SENSITIVE_FIELDS).get("name"),
         "month": month_str,
@@ -280,9 +292,9 @@ async def update_salary(
     soid = ObjectId(salary_id) if ObjectId.is_valid(salary_id) else None
     if not soid:
         raise HTTPException(status_code=404, detail="Salary not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await salaries_collection().find_one({"_id": soid})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Salary not found")
+    assert_same_laundry(existing, laundry_id, "Salary")
 
     updates = payload.model_dump(exclude_none=True)
     updates = {k: v for k, v in updates.items() if not isinstance(v, float) or v is not None}
@@ -333,6 +345,7 @@ async def list_attendance(
         query["date"] = {"$gte": start_date}
     if end_date:
         query["date"] = {**query.get("date", {}), "$lte": end_date}
+    query = scoped_query(query, resolve_laundry_id(current_user))
     cursor = attendance_collection().find(query).sort("date", -1)
     return [serialize(doc, ["notes"]) async for doc in cursor]
 
@@ -346,12 +359,13 @@ async def create_attendance(
     oid = ObjectId(employee_id) if ObjectId.is_valid(employee_id) else None
     if not oid:
         raise HTTPException(status_code=404, detail="Employee not found")
-    emp = await employees_collection().find_one({"_id": oid}, {"attendance_required": 1})
-    if not emp:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    laundry_id = resolve_laundry_id(current_user)
+    emp = await employees_collection().find_one({"_id": oid}, {"attendance_required": 1, "laundry_id": 1})
+    assert_same_laundry(emp, laundry_id, "Employee")
     if emp.get("attendance_required") is False:
         raise BadRequestError("Attendance is not required for this employee (fixed salary arrangement)")
     doc = {
+        "laundry_id": laundry_id,
         "employee_id": employee_id,
         "date": payload.date.isoformat(),
         "status": payload.status,
@@ -363,7 +377,7 @@ async def create_attendance(
         "updated_at": datetime.now(timezone.utc),
     }
     await attendance_collection().update_one(
-        {"employee_id": employee_id, "date": doc["date"]},
+        scoped_query({"employee_id": employee_id, "date": doc["date"]}, laundry_id),
         {"$set": {k: v for k, v in doc.items() if k not in ("employee_id", "date", "created_at")}, "$setOnInsert": {"employee_id": employee_id, "date": doc["date"], "created_at": doc["created_at"]}},
         upsert=True,
     )
@@ -381,9 +395,9 @@ async def update_attendance(
     aoid = ObjectId(attendance_id) if ObjectId.is_valid(attendance_id) else None
     if not aoid:
         raise HTTPException(status_code=404, detail="Attendance record not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await attendance_collection().find_one({"_id": aoid})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Attendance record not found")
+    assert_same_laundry(existing, laundry_id, "Attendance record")
 
     updates = payload.model_dump(exclude_none=True)
     if "overtime_hours" in updates:
@@ -403,6 +417,7 @@ async def delete_attendance(
     aoid = ObjectId(attendance_id) if ObjectId.is_valid(attendance_id) else None
     if not aoid:
         raise HTTPException(status_code=404, detail="Attendance record not found")
+    laundry_id = resolve_laundry_id(current_user)
     existing = await attendance_collection().find_one({"_id": aoid})
     if not existing:
         raise HTTPException(status_code=404, detail="Attendance record not found")

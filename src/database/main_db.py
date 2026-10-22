@@ -145,6 +145,14 @@ def saved_reports_collection() -> AsyncIOMotorCollection:
     return _coll(SAVED_REPORTS)
 
 
+async def _ensure_tenant_unique_index(collection, keys, legacy_index_name: str) -> None:
+    """Install tenant-scoped uniqueness before removing a legacy global index."""
+    await collection.create_index(keys, unique=True, background=True)
+    indexes = await collection.index_information()
+    if indexes.get(legacy_index_name, {}).get("unique"):
+        await collection.drop_index(legacy_index_name)
+
+
 async def ensure_indexes() -> None:
     """Create all required indexes at startup."""
     await customers_collection().create_index("name_search", background=True)
@@ -195,8 +203,12 @@ async def ensure_indexes() -> None:
 
     await salary_packages_collection().create_index([("employee_id", 1), ("month", 1)], unique=True, background=True)
 
+    await _ensure_tenant_unique_index(
+        holidays_collection(),
+        [("laundry_id", 1), ("date", 1)],
+        "date_1",
+    )
     await holidays_collection().create_index("date", background=True)
-    await holidays_collection().create_index([("date", 1)], unique=True, background=True)
 
     await extra_work_categories_collection().create_index("name", background=True)
     await extra_work_categories_collection().create_index("is_active", background=True)
