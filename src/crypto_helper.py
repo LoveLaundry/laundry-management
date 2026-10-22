@@ -16,6 +16,30 @@ KEK = hashlib.sha256((MASTER_KEY_ENV + "-kek").encode()).digest()
 HMAC_KEY = hashlib.sha256((MASTER_KEY_ENV + "-hmac").encode()).digest()
 
 
+# Envelope format this module understands. Anything else must fail loudly
+# instead of being decrypted with the wrong scheme.
+ENVELOPE_VERSION = 1
+ENVELOPE_ALGORITHM = "AES-256-GCM"
+ENVELOPE_KEY_ID = "master-key-v1"
+
+
+def _validate_metadata(meta: dict) -> None:
+    """Reject envelopes this build cannot read, instead of guessing."""
+    if not isinstance(meta, dict):
+        raise ValueError("Encryption metadata is malformed")
+
+    version = meta.get("version")
+    if version is not None and int(version) != ENVELOPE_VERSION:
+        raise ValueError(f"Unsupported encryption envelope version: {version!r}")
+
+    algorithm = meta.get("algorithm")
+    if algorithm is not None and str(algorithm).strip().upper() != ENVELOPE_ALGORITHM:
+        raise ValueError(f"Unsupported encryption algorithm: {algorithm!r}")
+
+    if not isinstance(meta.get("wrappedDek"), dict):
+        raise ValueError("Encryption metadata is missing the wrapped data key")
+
+
 def get_search_token(value: str) -> str:
     """Generate a deterministic, secure search token for exact match queries."""
     if not value:
@@ -39,7 +63,7 @@ def decrypt_field(encrypted_data: dict, dek: bytes) -> str:
         decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
         return decrypted_bytes.decode("utf-8")
     except Exception as e:
-        raise ValueError(f"Decryption failed: {str(e)}")
+        raise ValueError(f"Decryption failed ({type(e).__name__})") from e
 
 
 def encrypt_dict(data: dict, sensitive_fields: list) -> dict:
@@ -96,6 +120,7 @@ def decrypt_dict(encrypted_data: dict, sensitive_fields: list) -> dict:
         return {k: v for k, v in encrypted_data.items() if k != "encryption_metadata" and not k.endswith("_search")}
 
     meta = encrypted_data["encryption_metadata"]
+    _validate_metadata(meta)
     wrapped_dek = meta["wrappedDek"]
 
     try:
@@ -104,11 +129,11 @@ def decrypt_dict(encrypted_data: dict, sensitive_fields: list) -> dict:
         wrapped_dek_bytes = bytes.fromhex(wrapped_dek["ciphertext"])
         dek = aesgcm_kek.decrypt(dek_nonce, wrapped_dek_bytes, None)
     except Exception as e:
-        raise ValueError(f"Failed to unwrap DEK: {str(e)}")
+        raise ValueError(f"Failed to unwrap DEK ({type(e).__name__})") from e
 
     decrypted_data = {}
     for key, val in encrypted_data.items():
-        if key == "encryption_metadata" or key.endswith("_search"):
+        if key == "encryption_metadata":
             continue
         elif (
             key in sensitive_fields
@@ -116,11 +141,18 @@ def decrypt_dict(encrypted_data: dict, sensitive_fields: list) -> dict:
             and "ciphertext" in val
             and "nonce" in val
         ):
+            # Checked before the search-token rule below: a sensitive field
+            # whose name happens to end in "_search" holds real (encrypted)
+            # data and must be decrypted, not silently dropped.
             dec_val_str = decrypt_field(val, dek)
             if val.get("is_json"):
                 decrypted_data[key] = json.loads(dec_val_str)
             else:
                 decrypted_data[key] = dec_val_str
+        elif key.endswith("_search"):
+            # Derived search tokens never leave the service: they exist so the
+            # database can match an exact value without decrypting.
+            continue
         else:
             decrypted_data[key] = val
 
@@ -138,6 +170,7 @@ def encrypt_fields_for_update(current_doc: dict, updates: dict, sensitive_fields
     if not meta:
         return updates
 
+    _validate_metadata(meta)
     wrapped_dek = meta["wrappedDek"]
     try:
         aesgcm_kek = AESGCM(KEK)
@@ -145,7 +178,7 @@ def encrypt_fields_for_update(current_doc: dict, updates: dict, sensitive_fields
         wrapped_dek_bytes = bytes.fromhex(wrapped_dek["ciphertext"])
         dek = aesgcm_kek.decrypt(dek_nonce, wrapped_dek_bytes, None)
     except Exception as e:
-        raise ValueError(f"Failed to unwrap DEK: {str(e)}")
+        raise ValueError(f"Failed to unwrap DEK ({type(e).__name__})") from e
 
     out = {}
     for key, val in updates.items():
