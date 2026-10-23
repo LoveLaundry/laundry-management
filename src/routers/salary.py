@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import calendar
 from datetime import date as date_cls, datetime, timezone
 from typing import Optional
@@ -625,11 +625,11 @@ async def calculate_period_salary(
 
 
 # â”€â”€ Generate / Save Salary Slip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-async def _find_overlapping_slip(employee_id: str, start_str: str, end_str: str) -> Optional[dict]:
+async def _find_overlapping_slip(employee_id: str, start_str: str, end_str: str, laundry_id: str = "") -> Optional[dict]:
     """Return the first non-cancelled/deleted slip whose date range overlaps
     [start_str, end_str] for the same employee. Prevents the same date from
     being paid more than once (e.g. weekly slip + custom range slip)."""
-    return await salary_slips_collection().find_one({
+    query = {
         "employee_id": employee_id,
         "status": {"$nin": ["CANCELLED", "DELETED"]},
         "period_start": {"$lte": end_str},
