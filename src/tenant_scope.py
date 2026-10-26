@@ -8,7 +8,11 @@ applied to every read and write in one place, instead of relying on ~100 call
 sites each remembering to add ``laundry_id``. A missed call site is a silent
 data leak, so the default has to be safe rather than opt-in.
 
-Contract (matches ``bill_service`` / ``worker-service``):
+The same proxy exists in ``quotation-service`` (synchronous pymongo build of
+this file). ``bill_service`` / ``worker-service`` enforce the identical
+contract, but explicitly at each call site through their ``tenancy.py`` helpers
+(``scoped_query`` / ``owned_filter`` / ``match_stage``) rather than at the
+collection boundary. The rules below are shared by all four services:
 
 * The tenant comes only from signed JWT claims, via
   :func:`tenancy.resolve_laundry_id` — never from a body, query string or
