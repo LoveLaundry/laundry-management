@@ -873,6 +873,7 @@ async def delete_saved_report(
 async def outstanding_report(
     current_user: dict = Depends(require_capability("report:read")),
 ):
+    laundry_id = _resolve_laundry(current_user)
     billed_map: dict = {}
     # Only customer_id / customer_name / total_amount are consumed â€” project them
     # (plus encryption_metadata so customer_name can be decrypted) instead of
