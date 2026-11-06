@@ -300,6 +300,10 @@ async def update_expense(
             continue
         elif key == "amount" and val is not None:
             updates["amount"] = round(float(val), 2)
+        elif key == "client_name":
+            updates["client_name"] = (val or "").strip() or None
+        elif key == "allocation":
+            updates["allocation"] = (val or "SHARED").strip().upper()
         else:
             updates[key] = val
     if payload.category_name and payload.category_id:
