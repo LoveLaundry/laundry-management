@@ -102,26 +102,34 @@ async def delete_expense_category(
 async def expenses_summary(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
+    client_name: Optional[str] = Query(None),
+    group_by: Optional[str] = Query(None),
     current_user: dict = Depends(require_capability("expense:read")),
 ):
-    """Total expensed grouped by category."""
+    """Total expensed grouped by category (or by shop when group_by=client)."""
     query: dict = {}
     if start_date:
         query["date"] = {"$gte": start_date}
     if end_date:
         query["date"] = {**query.get("date", {}), "$lte": end_date}
+    if client_name:
+        query["client_name"] = client_name
     laundry_id = resolve_laundry_id(current_user)
     query = scoped_query(query, laundry_id)
 
+    by_client = group_by == "client"
     totals: dict = {}
     async for doc in expenses_collection().find(query):
-        cid = doc.get("category_id") or "uncategorized"
+        cid = (doc.get("client_name") or "Shared") if by_client else (doc.get("category_id") or "uncategorized")
         entry = totals.setdefault(cid, {"total": 0.0, "count": 0})
         entry["total"] += _num(doc.get("amount"))
         entry["count"] += 1
 
     result = []
     for cid, entry in totals.items():
+        if by_client:
+            result.append({"client": cid, "total": round(entry["total"], 2), "count": entry["count"]})
+            continue
         name = "Uncategorized"
         if cid != "uncategorized" and ObjectId.is_valid(cid):
             cat_doc = await expense_categories_collection().find_one(
@@ -172,6 +180,11 @@ async def create_expense(
 
     if payload.amount <= 0:
         raise BadRequestError("Amount must be greater than zero")
+    allocation = (payload.allocation or "SHARED").strip().upper()
+    if allocation not in ("SHOP", "SHARED"):
+        raise BadRequestError("Allocation must be SHOP or SHARED")
+    if allocation == "SHOP" and not (payload.client_name or "").strip():
+        raise BadRequestError("A shop-allocated expense needs a client_name")
     laundry_id = resolve_laundry_id(current_user)
     category_name = await _resolve_category_name(payload.category_id, payload.category_name, laundry_id)
     doc = {
@@ -184,6 +197,8 @@ async def create_expense(
         "payment_method": payload.payment_method,
         "is_recurring": payload.is_recurring,
         "notes": (payload.notes or "").strip() or None,
+        "client_name": (payload.client_name or "").strip() or None,
+        "allocation": (payload.allocation or "SHARED").strip().upper(),
         "laundry_id": laundry_id,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),

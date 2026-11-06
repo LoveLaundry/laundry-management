@@ -563,6 +563,9 @@ class ExpenseCreate(BaseModel):
     payment_method: str = "CASH"
     is_recurring: bool = False
     notes: Optional[str] = None
+    # SHOP allocates the cost to one hotel/shop; SHARED is a day-level laundry cost.
+    client_name: Optional[str] = None
+    allocation: str = "SHARED"
 
 
 class ExpenseUpdate(BaseModel):
@@ -575,6 +578,8 @@ class ExpenseUpdate(BaseModel):
     payment_method: Optional[str] = None
     is_recurring: Optional[bool] = None
     notes: Optional[str] = None
+    client_name: Optional[str] = None
+    allocation: Optional[str] = None
 
 
 class ExpenseTemplateCreate(BaseModel):
