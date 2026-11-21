@@ -45,43 +45,6 @@ ROLE_CAPABILITIES = {
         "payment:read", "payment:write",
         "report:read", "report:write", "dashboard:read", "import:write",
     ],
-    # Tenant sub-admins (hotel / shop / laundry admins) provisioned by the
-    # platform administrator carry the full administrator capability set of
-    # their own tenant, so they can read expenses / reports / dashboards. The
-    # platform admin is a strict superset of ADMIN.
-    "SHOP_ADMIN": [
-        "management:read", "management:write",
-        "customer:read", "customer:write",
-        "item:read", "item:write",
-        "transaction:read", "transaction:write",
-        "expense:read", "expense:write",
-        "employee:read", "employee:write",
-        "salary:read", "salary:write",
-        "payment:read", "payment:write",
-        "report:read", "dashboard:read", "import:write",
-    ],
-    "HOTEL_ADMIN": [
-        "management:read", "management:write",
-        "customer:read", "customer:write",
-        "item:read", "item:write",
-        "transaction:read", "transaction:write",
-        "expense:read", "expense:write",
-        "employee:read", "employee:write",
-        "salary:read", "salary:write",
-        "payment:read", "payment:write",
-        "report:read", "dashboard:read", "import:write",
-    ],
-    "PLATFORM_ADMIN": [
-        "management:read", "management:write",
-        "customer:read", "customer:write",
-        "item:read", "item:write",
-        "transaction:read", "transaction:write",
-        "expense:read", "expense:write",
-        "employee:read", "employee:write",
-        "salary:read", "salary:write",
-        "payment:read", "payment:write",
-        "report:read", "dashboard:read", "import:write",
-    ],
     "MANAGER": [
         "management:read", "management:write",
         "customer:read", "customer:write",
