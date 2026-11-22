@@ -605,6 +605,10 @@ class ExpenseCreate(BaseModel):
     payment_method: str = "CASH"
     is_recurring: bool = False
     notes: Optional[str] = None
+    # Today Sheet allocation. SHARED is the business-wide cost of washing;
+    # SHOP attributes the expense to one hotel and requires its client name.
+    client_name: Optional[str] = None
+    allocation: Literal["SHOP", "SHARED"] = "SHARED"
 
 
 class ExpenseUpdate(BaseModel):
@@ -617,6 +621,8 @@ class ExpenseUpdate(BaseModel):
     payment_method: Optional[str] = None
     is_recurring: Optional[bool] = None
     notes: Optional[str] = None
+    client_name: Optional[str] = None
+    allocation: Optional[Literal["SHOP", "SHARED"]] = None
 
 
 class ExpenseTemplateCreate(BaseModel):

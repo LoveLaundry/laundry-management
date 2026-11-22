@@ -174,6 +174,10 @@ async def create_expense(
         raise BadRequestError("Amount must be greater than zero")
     laundry_id = resolve_laundry_id(current_user)
     category_name = await _resolve_category_name(payload.category_id, payload.category_name, laundry_id)
+    client_name = (payload.client_name or "").strip() or None
+    # A shop allocation without a shop is meaningless; fall back to SHARED
+    # instead of storing a half-labelled expense that reports cannot attribute.
+    allocation = "SHOP" if client_name and payload.allocation == "SHOP" else "SHARED"
     doc = {
         "date": payload.date.isoformat(),
         "category_id": payload.category_id,
@@ -184,13 +188,15 @@ async def create_expense(
         "payment_method": payload.payment_method,
         "is_recurring": payload.is_recurring,
         "notes": (payload.notes or "").strip() or None,
+        "client_name": client_name,
+        "allocation": allocation,
         "laundry_id": laundry_id,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
     encrypted = encrypt_dict(doc, SENSITIVE_FIELDS)
     result = await expenses_collection().insert_one(encrypted)
-    await log_audit(current_user, "create", "expense", str(result.inserted_id), details={"amount": payload.amount, "category": category_name})
+    await log_audit(current_user, "create", "expense", str(result.inserted_id), details={"amount": payload.amount, "category": category_name, "allocation": allocation, "client": client_name})
     await idempotency.mark_processed(request, user_id, "expense", str(result.inserted_id))
     encrypted["_id"] = result.inserted_id
     return serialize(encrypted, SENSITIVE_FIELDS)
@@ -289,6 +295,12 @@ async def update_expense(
             updates[key] = val
     if payload.category_name and payload.category_id:
         updates["category_name"] = await _resolve_category_name(payload.category_id, payload.category_name, laundry_id)
+    if "client_name" in updates or "allocation" in updates:
+        client = updates.get("client_name", existing.get("client_name"))
+        client = str(client or "").strip() or None
+        requested_allocation = updates.get("allocation", existing.get("allocation"))
+        updates["client_name"] = client
+        updates["allocation"] = "SHOP" if client and requested_allocation == "SHOP" else "SHARED"
     if any(k in SENSITIVE_FIELDS for k in updates):
         updates = encrypt_fields_for_update(existing, updates, SENSITIVE_FIELDS)
     updates["updated_at"] = datetime.now(timezone.utc)
