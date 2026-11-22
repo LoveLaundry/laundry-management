@@ -39,6 +39,7 @@ DEFAULT_SETTINGS = {
     "working_days_pattern": [0, 1, 2, 3, 4, 5],
     "default_overtime_rate": 0,
     "salary_basis_days": 30,
+    "linen_missing_after_days": 7,
     "electricity_meter_1_name": "Chilaw Connection Line",
     "electricity_meter_2_name": "Madampe Connection Line",
     "electricity_unit_slabs": [],
@@ -57,6 +58,10 @@ ADMIN_ELECTRICITY_SETTINGS = {
     "electricity_projection_method",
     "electricity_projection_formula",
 }
+
+# The overdue-linen window is operational policy, not payroll: only an admin
+# may change it, just like the electricity tariff settings.
+ADMIN_ONLY_SETTINGS = ADMIN_ELECTRICITY_SETTINGS | {"linen_missing_after_days"}
 
 
 def _meter_reading_response(doc: dict) -> dict:
@@ -151,10 +156,11 @@ async def update_settings(
 ):
     laundry_id = resolve_laundry_id(current_user)
     fields_set = payload.model_fields_set
-    if ADMIN_ELECTRICITY_SETTINGS & fields_set and str(current_user.get("role", "")).upper() != "ADMIN":
+    role = str(current_user.get("role", "")).upper()
+    if ADMIN_ONLY_SETTINGS & fields_set and role not in {"ADMIN", "PLATFORM_ADMIN"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only an admin can configure electricity meters and their tariff slabs.",
+            detail="Only an admin can configure electricity meters, tariff slabs and linen cycle settings.",
         )
 
     existing = await company_settings_collection().find_one(

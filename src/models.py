@@ -505,6 +505,7 @@ class CompanySettingsUpdate(BaseModel):
     working_days_pattern: Optional[List[int]] = None
     default_overtime_rate: Optional[float] = None
     salary_basis_days: Optional[int] = None
+    linen_missing_after_days: Optional[int] = Field(default=None, ge=1, le=365)
     electricity_meter_1_name: Optional[str] = Field(default=None, max_length=60)
     electricity_meter_2_name: Optional[str] = Field(default=None, max_length=60)
     electricity_unit_slabs: Optional[List[ElectricityUnitSlab]] = None
