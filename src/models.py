@@ -499,6 +499,46 @@ class ElectricityUnitSlab(BaseModel):
     fixed_charge_lkr: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
 
+class LinenTransitionRule(BaseModel):
+    """One admin-defined ``previous state -> allowed next states`` rule."""
+
+    from_status: str = Field(min_length=1, max_length=40)
+    to_statuses: List[str] = Field(default_factory=list)
+
+    @field_validator("from_status", "to_statuses")
+    @classmethod
+    def clean_status(cls, value):
+        if isinstance(value, str):
+            cleaned = value.strip().upper()
+            if not cleaned:
+                raise ValueError("Linen statuses cannot be blank")
+            return cleaned
+        cleaned = [str(item).strip().upper() for item in value]
+        if any(not item for item in cleaned):
+            raise ValueError("Linen statuses cannot be blank")
+        # Preserve order (the UI is a checklist) while avoiding duplicates.
+        return list(dict.fromkeys(cleaned))
+
+
+class LinenTransitionRules(BaseModel):
+    """Tenant-wide scan policy: the matrix and how violations are handled."""
+
+    # block = reject the scan and record nothing; warn = allow the scan but
+    # attach a warning to the result so the operator and audit trail can see it.
+    violation_mode: str = "block"
+    # from_status -> list of allowed to_status values. A status absent from the
+    # matrix means "no restriction" so partial configurations stay usable.
+    rules: List[LinenTransitionRule] = Field(default_factory=list)
+
+    @field_validator("violation_mode")
+    @classmethod
+    def clean_mode(cls, value: str) -> str:
+        mode = str(value or "").strip().lower()
+        if mode not in {"block", "warn"}:
+            raise ValueError("Violation mode must be 'block' or 'warn'")
+        return mode
+
+
 class CompanySettingsUpdate(BaseModel):
     company_name: Optional[str] = None
     working_days_per_week: Optional[int] = None
@@ -506,6 +546,7 @@ class CompanySettingsUpdate(BaseModel):
     default_overtime_rate: Optional[float] = None
     salary_basis_days: Optional[int] = None
     linen_missing_after_days: Optional[int] = Field(default=None, ge=1, le=365)
+    linen_transition_rules: Optional[LinenTransitionRules] = None
     electricity_meter_1_name: Optional[str] = Field(default=None, max_length=60)
     electricity_meter_2_name: Optional[str] = Field(default=None, max_length=60)
     electricity_unit_slabs: Optional[List[ElectricityUnitSlab]] = None

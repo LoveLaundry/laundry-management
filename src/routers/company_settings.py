@@ -8,7 +8,12 @@ from ..database.main_db import (
     company_settings_collection,
     electricity_meter_readings_collection,
 )
-from ..models import CompanySettingsUpdate, ElectricityMeterReadingCreate, ElectricityMeterReadingUpdate
+from ..models import (
+    CompanySettingsUpdate,
+    ElectricityMeterReadingCreate,
+    ElectricityMeterReadingUpdate,
+    LinenTransitionRules,
+)
 from ..router_utils import serialize, log_audit, parse_object_id
 from ..services.electricity_slabs import (
     ElectricitySlabError,
@@ -40,6 +45,25 @@ DEFAULT_SETTINGS = {
     "default_overtime_rate": 0,
     "salary_basis_days": 30,
     "linen_missing_after_days": 7,
+    # The default matrix encodes the normal hotel -> laundry -> hotel cycle.
+    # Admins can edit every row in Company Settings; a status not listed here
+    # is unrestricted. See docs for the exact action -> status mapping.
+    "linen_transition_rules": {
+        "violation_mode": "block",
+        "rules": [
+            {"from_status": "IN_STOCK", "to_statuses": ["COLLECTED"]},
+            {"from_status": "AT_CLIENT", "to_statuses": ["COLLECTED"]},
+            {"from_status": "COLLECTED", "to_statuses": ["AT_LAUNDRY"]},
+            {"from_status": "AT_LAUNDRY", "to_statuses": ["WASHING"]},
+            {"from_status": "WASHING", "to_statuses": ["DRYING"]},
+            {"from_status": "DRYING", "to_statuses": ["PRESSING"]},
+            {"from_status": "PRESSING", "to_statuses": ["READY"]},
+            {"from_status": "READY", "to_statuses": ["DELIVERED"]},
+            {"from_status": "DELIVERED", "to_statuses": ["AT_CLIENT"]},
+            {"from_status": "MISSING", "to_statuses": ["IN_STOCK", "AT_CLIENT", "DAMAGED", "RETIRED"]},
+            {"from_status": "DAMAGED", "to_statuses": ["IN_STOCK", "RETIRED"]},
+        ],
+    },
     "electricity_meter_1_name": "Chilaw Connection Line",
     "electricity_meter_2_name": "Madampe Connection Line",
     "electricity_unit_slabs": [],
@@ -61,7 +85,10 @@ ADMIN_ELECTRICITY_SETTINGS = {
 
 # The overdue-linen window is operational policy, not payroll: only an admin
 # may change it, just like the electricity tariff settings.
-ADMIN_ONLY_SETTINGS = ADMIN_ELECTRICITY_SETTINGS | {"linen_missing_after_days"}
+ADMIN_ONLY_SETTINGS = ADMIN_ELECTRICITY_SETTINGS | {
+    "linen_missing_after_days",
+    "linen_transition_rules",
+}
 
 
 def _meter_reading_response(doc: dict) -> dict:
@@ -168,6 +195,8 @@ async def update_settings(
     )
     updates = payload.model_dump(exclude_none=True)
     unset_fields = {}
+    if "linen_transition_rules" in updates and payload.linen_transition_rules is not None:
+        updates["linen_transition_rules"] = payload.linen_transition_rules.model_dump()
     if "electricity_unit_slabs" in updates and payload.electricity_unit_slabs is not None:
         slab_dicts = [slab.model_dump() for slab in payload.electricity_unit_slabs]
         try:
